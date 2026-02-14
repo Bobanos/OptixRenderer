@@ -55,7 +55,7 @@ target_link_libraries(imgui PUBLIC glfw)
 add_executable(optix_renderer
     src/main.cpp
     src/renderer.cpp
-)
+    src/renderer.h)
 
 target_include_directories(optix_renderer PRIVATE
     src

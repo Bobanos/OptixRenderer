@@ -1,65 +1,46 @@
 #include <optix.h>
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
+
+#include <glad/glad.h> // Needs to be included before gl_interop
+
 #include <cuda_runtime.h>
+#include <cuda_gl_interop.h>
 
 #include <vector>
 #include <fstream>
 #include <iostream>
 #include <cassert>
 
-// ------------------------------------------------------------------
-// Error helpers
-// ------------------------------------------------------------------
+#include "renderer.h"
+#include "optix_params.h"
 
-#define CUDA_CHECK(x) do {                                  \
-    cudaError_t rc = x;                                     \
-    if (rc != cudaSuccess) {                                \
-        std::cerr << "CUDA error: "                          \
-                  << cudaGetErrorString(rc) << std::endl;  \
-        std::exit(1);                                       \
-    }                                                       \
-} while(0)
+#include <GLFW/glfw3.h>
 
-#define OPTIX_CHECK(x) do {                                 \
-    OptixResult rc = x;                                     \
-    if (rc != OPTIX_SUCCESS) {                              \
-        std::cerr << "OptiX error: " << rc << std::endl;    \
-        std::exit(1);                                       \
-    }                                                       \
-} while(0)
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
+const int width = 800;
+const int height = 600;
+
+const int window_width = 1200;
+const int window_height = 800;
 
 // ------------------------------------------------------------------
 // OptiX log callback
 // ------------------------------------------------------------------
 
-static void optixLogCallback(
-    unsigned int level,
-    const char* tag,
-    const char* message,
-    void*)
-{
+static void optixLogCallback(unsigned int level, const char* tag, const char* message, void*){
     std::cerr << "[OptiX][" << level << "][" << tag << "] "
         << message << std::endl;
 }
 
 // ------------------------------------------------------------------
-// Launch params
-// ------------------------------------------------------------------
-
-struct Params
-{
-    uchar4* image;
-    int     width;
-    int     height;
-};
-
-// ------------------------------------------------------------------
 // Utility: load file
 // ------------------------------------------------------------------
 
-static std::vector<char> loadFile(const std::string& path)
-{
+static std::vector<char> loadFile(const std::string& path){
     std::ifstream f(path, std::ios::binary);
     if (!f)
         throw std::runtime_error("Failed to open file: " + path);
@@ -73,18 +54,149 @@ static std::vector<char> loadFile(const std::string& path)
     return data;
 }
 
+// ------------------------------------------------------------------
+// Geometry data for a cube
+// ------------------------------------------------------------------
 
+float3 vertices[8] = {
+    {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f},
+    {0.5f,  0.5f, -0.5f}, {-0.5f,  0.5f, -0.5f},
+    {-0.5f, -0.5f,  0.5f}, {0.5f, -0.5f,  0.5f},
+    {0.5f,  0.5f,  0.5f}, {-0.5f,  0.5f,  0.5f}
+};
 
+uint3 indices[12] = {
+    {0,1,2}, {0,2,3},  // Front
+    {4,6,5}, {4,7,6},  // Back
+    {0,4,5}, {0,5,1},  // Bottom
+    {2,6,7}, {2,7,3},  // Top
+    {0,3,7}, {0,7,4},  // Left
+    {1,5,6}, {1,6,2}   // Right
+};
+
+// ------------------------------------------------------------------
+// OpenGL utility functions
+// ------------------------------------------------------------------
+void framebuffer_size_callback(GLFWwindow* window, int width, int height)
+{
+    glViewport(0, 0, width, height);
+}
+
+void processInput(GLFWwindow* window)
+{
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+}
+
+// ------------------------------------------------------------------
+// Display Buffer for ImGui
+// ------------------------------------------------------------------
+
+class ImGuiDisplayBuffer {
+public:
+    ImGuiDisplayBuffer(int w, int h) : width(w), height(h) {
+        // Create OpenGL texture
+        glGenTextures(1, &gl_texture);
+        glBindTexture(GL_TEXTURE_2D, gl_texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // Register with CUDA
+        CUDA_CHECK(cudaGraphicsGLRegisterImage(
+            &cuda_resource,
+            gl_texture,
+            GL_TEXTURE_2D,
+            cudaGraphicsRegisterFlagsWriteDiscard
+        ));
+    }
+
+    ~ImGuiDisplayBuffer() {
+        if (cuda_resource) {
+            cudaGraphicsUnregisterResource(cuda_resource);
+        }
+        if (gl_texture) {
+            glDeleteTextures(1, &gl_texture);
+        }
+    }
+
+    void copyFromDevice(CUdeviceptr d_pixels) {
+        // Map OpenGL texture to CUDA
+        CUDA_CHECK(cudaGraphicsMapResources(1, &cuda_resource, 0));
+
+        cudaArray_t array;
+        CUDA_CHECK(cudaGraphicsSubResourceGetMappedArray(&array, cuda_resource, 0, 0));
+
+        // Copy from CUDA buffer to OpenGL texture
+        CUDA_CHECK(cudaMemcpy2DToArray(
+            array,
+            0, 0,
+            (void*)d_pixels,
+            width * sizeof(uchar4),
+            width * sizeof(uchar4),
+            height,
+            cudaMemcpyDeviceToDevice
+        ));
+
+        CUDA_CHECK(cudaGraphicsUnmapResources(1, &cuda_resource, 0));
+    }
+
+    GLuint getTexture() const { return gl_texture; }
+    int getWidth() const { return width; }
+    int getHeight() const { return height; }
+
+private:
+    int width, height;
+    GLuint gl_texture = 0;
+    cudaGraphicsResource_t cuda_resource = nullptr;
+};
 
 
 // ------------------------------------------------------------------
 // Main
 // ------------------------------------------------------------------
 
-int main()
-{
-    try
+int main(){
+
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow(window_width, window_height, "Optix 9.1.0 PathTracer", NULL, NULL);
+    
+    if (window == NULL)
     {
+        std::cout << "[GLFW] Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1); // Enable vsync
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+    {
+        std::cout << "[GLAD] Failed to initialize GLAD" << std::endl;
+        return -1;
+    }
+
+    glViewport(0, 0, width, height);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+
+    // ----------------------------------------------------------
+    // Setup Dear ImGui
+    // ----------------------------------------------------------
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+    ImGui::StyleColorsClassic();
+
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 460");
+
+    try{
         // ----------------------------------------------------------
         // CUDA + OptiX init
         // ----------------------------------------------------------
@@ -98,7 +210,14 @@ int main()
         ctx_opts.logCallbackFunction = optixLogCallback;
         ctx_opts.logCallbackLevel = 4;
 
+#ifdef _DEBUG
+        // This may incur significant performance cost and should only be done during development.
+        std::cout << "DEBUG ENABLED" << std::endl;
+        ctx_opts.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+#endif
+
         OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &ctx_opts, &context));
+
 
         // ----------------------------------------------------------
         // Module
@@ -153,11 +272,9 @@ int main()
 
         OptixProgramGroupOptions pg_opts = {};
 
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
+        OPTIX_CHECK(optixProgramGroupCreate(context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
 
-        OPTIX_CHECK(optixProgramGroupCreate(
-            context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
+        OPTIX_CHECK(optixProgramGroupCreate(context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
 
         // ----------------------------------------------------------
         // Pipeline
@@ -182,13 +299,11 @@ int main()
         // ----------------------------------------------------------
         // SBT
         // ----------------------------------------------------------
-        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) RaygenRecord
-        {
+        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) RaygenRecord{
             char header[OPTIX_SBT_RECORD_HEADER_SIZE];
         };
 
-        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) MissRecord
-        {
+        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) MissRecord{
             char header[OPTIX_SBT_RECORD_HEADER_SIZE];
         };
 
@@ -212,10 +327,9 @@ int main()
         sbt.missRecordCount = 1;
 
         // ----------------------------------------------------------
-        // Output buffer
+        // Output buffer + Display
         // ----------------------------------------------------------
-        const int width = 256;
-        const int height = 256;
+
 
         CUdeviceptr d_pixels;
         CUDA_CHECK(cudaMalloc((void**)&d_pixels, width * height * sizeof(uchar4)));
@@ -229,29 +343,93 @@ int main()
         CUDA_CHECK(cudaMalloc((void**)&d_params, sizeof(Params)));
         CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
-        // ----------------------------------------------------------
-        // Launch
-        // ----------------------------------------------------------
-        OPTIX_CHECK(optixLaunch(
-            pipeline,
-            0,
-            d_params,
-            sizeof(Params),
-            &sbt,
-            width,
-            height,
-            1
-        ));
+        // Create display buffer
+        ImGuiDisplayBuffer display(width, height);
 
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // ----------------------------------------------------------
+        // Render Loop
+        // ----------------------------------------------------------
+        while (!glfwWindowShouldClose(window))
+        {
+            glClear(GL_COLOR_BUFFER_BIT);
+            glfwPollEvents();
+
+            // Start ImGui frame
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            // input
+            processInput(window);
+
+            // rendering commands here
+            OPTIX_CHECK(optixLaunch(
+                pipeline,
+                0,
+                d_params,
+                sizeof(Params),
+                &sbt,
+                width,
+                height,
+                1
+            ));
+
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Copy OptiX output to OpenGL texture
+            display.copyFromDevice(d_pixels);
+
+            // ImGui viewport window
+            ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar);
+
+            // Get available size
+            ImVec2 viewportSize = ImGui::GetContentRegionAvail();
+
+            // Display the texture
+            ImGui::Image(
+                (void*)(intptr_t)display.getTexture(),
+                ImVec2(display.getWidth(), display.getHeight()),
+                ImVec2(0, 1),  // UV coordinates (flip Y)
+                ImVec2(1, 0)
+            );
+
+            ImGui::End();
+
+            // Optional: Stats window
+            ImGui::Begin("Stats");
+            ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
+            ImGui::Text("Resolution: %dx%d", width, height);
+            ImGui::End();
+
+            // Render ImGui
+            ImGui::Render();
+
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+            glfwSwapBuffers(window);
+
+        }
 
         std::cout << "SUCCESS: OptiX launch completed." << std::endl;
     }
-    catch (const std::exception& e)
-    {
+    catch (const std::exception& e){
         std::cerr << "Exception: " << e.what() << std::endl;
+
+        // Cleanup ImGui
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+
+        glfwTerminate();
         return 1;
     }
+
+    // Cleanup ImGui
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glfwTerminate();
 
     return 0;
 }
