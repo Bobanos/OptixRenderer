@@ -29,11 +29,8 @@ set(OPTIX_INCLUDE_DIR "${OPTIX_ROOT}/include")
 # GLFW
 add_subdirectory(external/glfw)
 
-# GLM (header-only)
-add_subdirectory(external/glm)
-
 # GLAD
-add_library(glad external/glad/src/gl.c)
+add_library(glad external/glad/src/glad.c)
 target_include_directories(glad PUBLIC external/glad/include)
 
 # ImGui
