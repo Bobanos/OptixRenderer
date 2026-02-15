@@ -15,5 +15,5 @@ struct Params {
     uchar4* image;
     int     width;
     int     height;
-    //Camera  camera;
+    Camera  camera;
 };

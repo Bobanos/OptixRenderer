@@ -14,6 +14,7 @@
 
 #include "renderer.h"
 #include "optix_params.h"
+#include "camera.h"
 
 #include <GLFW/glfw3.h>
 
@@ -27,14 +28,9 @@ const int height = 600;
 const int window_width = 1200;
 const int window_height = 800;
 
-// ------------------------------------------------------------------
-// OptiX log callback
-// ------------------------------------------------------------------
-
-static void optixLogCallback(unsigned int level, const char* tag, const char* message, void*){
-    std::cerr << "[OptiX][" << level << "][" << tag << "] "
-        << message << std::endl;
-}
+// Camera instance (global for mouse callback)
+CameraController* g_camera = nullptr;
+bool g_mouse_captured = false;
 
 // ------------------------------------------------------------------
 // Utility: load file
@@ -75,17 +71,57 @@ uint3 indices[12] = {
 };
 
 // ------------------------------------------------------------------
-// OpenGL utility functions
+// Callbacks and input processing
 // ------------------------------------------------------------------
+static void optixLogCallback(unsigned int level, const char* tag, const char* message, void*) {
+    std::cerr << "[OptiX][" << level << "][" << tag << "] "
+        << message << std::endl;
+}
+
 void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 {
     glViewport(0, 0, width, height);
 }
 
-void processInput(GLFWwindow* window)
+void mouse_callback(GLFWwindow* window, double xpos, double ypos)
+{
+    if (g_camera && g_mouse_captured) {
+        g_camera->processMouseMovement((float)xpos, (float)ypos);
+    }
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    if (g_camera) {
+        g_camera->processMouseScroll((float)yoffset);
+    }
+}
+
+void processInput(GLFWwindow* window, float deltaTime)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
+
+    // Toggle mouse capture with TAB
+    static bool tab_pressed = false;
+    if (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS && !tab_pressed) {
+        tab_pressed = true;
+        g_mouse_captured = !g_mouse_captured;
+
+        if (g_mouse_captured) {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+        else {
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+    }
+    if (glfwGetKey(window, GLFW_KEY_TAB) == GLFW_RELEASE) {
+        tab_pressed = false;
+    }
+
+    if (g_camera && g_mouse_captured) {
+        g_camera->processKeyboard(window, deltaTime);
+    }
 }
 
 // ------------------------------------------------------------------
@@ -183,6 +219,8 @@ int main(){
 
     glViewport(0, 0, width, height);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
 
     // ----------------------------------------------------------
     // Setup Dear ImGui
@@ -190,9 +228,7 @@ int main(){
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-
     ImGui::StyleColorsClassic();
-
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
 
@@ -273,7 +309,6 @@ int main(){
         OptixProgramGroupOptions pg_opts = {};
 
         OPTIX_CHECK(optixProgramGroupCreate(context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
-
         OPTIX_CHECK(optixProgramGroupCreate(context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
 
         // ----------------------------------------------------------
@@ -329,8 +364,6 @@ int main(){
         // ----------------------------------------------------------
         // Output buffer + Display
         // ----------------------------------------------------------
-
-
         CUdeviceptr d_pixels;
         CUDA_CHECK(cudaMalloc((void**)&d_pixels, width * height * sizeof(uchar4)));
 
@@ -346,12 +379,30 @@ int main(){
         // Create display buffer
         ImGuiDisplayBuffer display(width, height);
 
+        // Create camera
+        CameraController camera_controller(
+            make_float3(0.0f, 0.0f, 3.0f),  // position
+            make_float3(0.0f, 0.0f, 0.0f),  // look at
+            make_float3(0.0f, 1.0f, 0.0f),  // up
+            60.0f,                           // vfov
+            (float)width / (float)height    // aspect ratio
+        );
+        g_camera = &camera_controller;
+
+        // Timing
+        float deltaTime = 0.0f;
+        float lastFrame = 0.0f;
+
         // ----------------------------------------------------------
         // Render Loop
         // ----------------------------------------------------------
         while (!glfwWindowShouldClose(window))
         {
-            glClear(GL_COLOR_BUFFER_BIT);
+            // Calculate delta time - ADDED
+            float currentFrame = (float)glfwGetTime();
+            deltaTime = currentFrame - lastFrame;
+            lastFrame = currentFrame;
+
             glfwPollEvents();
 
             // Start ImGui frame
@@ -359,10 +410,14 @@ int main(){
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            // input
-            processInput(window);
+            // Input processing
+            processInput(window, deltaTime);
 
-            // rendering commands here
+            // Update camera parameters
+            params.camera = camera_controller.getCameraData();
+            CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
+
+            // OptiX render
             OPTIX_CHECK(optixLaunch(
                 pipeline,
                 0,
@@ -382,9 +437,6 @@ int main(){
             // ImGui viewport window
             ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar);
 
-            // Get available size
-            ImVec2 viewportSize = ImGui::GetContentRegionAvail();
-
             // Display the texture
             ImGui::Image(
                 (void*)(intptr_t)display.getTexture(),
@@ -392,25 +444,47 @@ int main(){
                 ImVec2(0, 1),  // UV coordinates (flip Y)
                 ImVec2(1, 0)
             );
-
             ImGui::End();
 
-            // Optional: Stats window
-            ImGui::Begin("Stats");
-            ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-            ImGui::Text("Resolution: %dx%d", width, height);
+            // Camera Controls window - CHANGED: Updated with camera info
+            ImGui::Begin("Camera Controls");
+            ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
+            ImGui::Text("Press TAB to toggle camera control");
+            ImGui::Text("Camera Captured: %s", g_mouse_captured ? "Yes" : "No");
+
+            float3 pos = camera_controller.getPosition();
+            ImGui::Text("Position: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+            ImGui::Text("Speed: %.2f", camera_controller.getSpeed());
+
+            ImGui::Separator();
+            ImGui::Text("Controls:");
+            ImGui::BulletText("WASD: Move");
+            ImGui::BulletText("Q/E: Down/Up");
+            ImGui::BulletText("Mouse: Look around");
+            ImGui::BulletText("Scroll: Adjust speed");
             ImGui::End();
 
             // Render ImGui
             ImGui::Render();
 
+            int display_w, display_h;
+            glfwGetFramebufferSize(window, &display_w, &display_h);
+            glViewport(0, 0, display_w, display_h);
+            glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
             glfwSwapBuffers(window);
-
         }
 
         std::cout << "SUCCESS: OptiX launch completed." << std::endl;
+
+        // Cleanup
+        CUDA_CHECK(cudaFree((void*)d_pixels));
+        CUDA_CHECK(cudaFree((void*)d_params));
+        CUDA_CHECK(cudaFree((void*)d_rg));
+        CUDA_CHECK(cudaFree((void*)d_ms));
     }
     catch (const std::exception& e){
         std::cerr << "Exception: " << e.what() << std::endl;

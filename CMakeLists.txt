@@ -55,7 +55,11 @@ target_link_libraries(imgui PUBLIC glfw)
 add_executable(optix_renderer
     src/main.cpp
     src/renderer.cpp
-    src/renderer.h)
+    src/renderer.h
+    src/camera.cpp
+    src/camera.h
+    src/optix_params.h
+)
 
 target_include_directories(optix_renderer PRIVATE
     src
@@ -98,6 +102,7 @@ function(compile_optix_ir target_name)
                 --use_fast_math
                 -lineinfo
                 -I${OPTIX_INCLUDE_DIR}
+                -I${CMAKE_SOURCE_DIR}/src
                 -I${CMAKE_SOURCE_DIR}
                 ${src}
                 -o ${output}
