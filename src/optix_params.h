@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <optix_types.h>
 
 // This file defines the data structures that will be shared between the host and device code.
 
@@ -16,4 +17,5 @@ struct Params {
     int     width;
     int     height;
     Camera  camera;
+    OptixTraversableHandle traversable;
 };

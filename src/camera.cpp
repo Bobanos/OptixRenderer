@@ -77,7 +77,7 @@ Camera CameraController::getCameraData() const {
     cam_data.origin = position;
     cam_data.horizontal = viewport_width * right;
     cam_data.vertical = viewport_height * up;
-    cam_data.lower_left_corner = position - cam_data.horizontal * 0.5f - cam_data.vertical * 0.5f - front;
+    cam_data.lower_left_corner = position - cam_data.horizontal * 0.5f - cam_data.vertical * 0.5f + front;
 
     return cam_data;
 }

@@ -267,8 +267,8 @@ int main(){
         OptixPipelineCompileOptions pipeline_opts = {};
         pipeline_opts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
         pipeline_opts.usesMotionBlur = false;
-        pipeline_opts.numPayloadValues = 0;
-        pipeline_opts.numAttributeValues = 0;
+        pipeline_opts.numPayloadValues = 3; //3 for RGB color
+        pipeline_opts.numAttributeValues = 2; //2 for barycentrics
         pipeline_opts.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
         pipeline_opts.pipelineLaunchParamsVariableName = "params";
 
@@ -295,6 +295,7 @@ int main(){
         // ----------------------------------------------------------
         OptixProgramGroup raygen_pg = nullptr;
         OptixProgramGroup miss_pg = nullptr;
+        OptixProgramGroup hitgroup_pg = nullptr;
 
         OptixProgramGroupDesc rg_desc = {};
         rg_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
@@ -306,15 +307,21 @@ int main(){
         ms_desc.miss.module = module;
         ms_desc.miss.entryFunctionName = "__miss__ms";
 
+        OptixProgramGroupDesc hg_desc = {};
+        hg_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        hg_desc.hitgroup.moduleCH = module;
+        hg_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+
         OptixProgramGroupOptions pg_opts = {};
 
         OPTIX_CHECK(optixProgramGroupCreate(context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
         OPTIX_CHECK(optixProgramGroupCreate(context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
+        OPTIX_CHECK(optixProgramGroupCreate(context, &hg_desc, 1, &pg_opts, log, &logSize, &hitgroup_pg));
 
         // ----------------------------------------------------------
         // Pipeline
         // ----------------------------------------------------------
-        OptixProgramGroup groups[] = { raygen_pg, miss_pg };
+        OptixProgramGroup groups[] = { raygen_pg, miss_pg , hitgroup_pg };
 
         OptixPipelineLinkOptions link_opts = {};
         link_opts.maxTraceDepth = 1;
@@ -325,11 +332,88 @@ int main(){
             &pipeline_opts,
             &link_opts,
             groups,
-            2,
+            3,
             log,
             &logSize,
             &pipeline
         ));
+
+
+        // ----------------------------------------------------------
+        // Build Acceleration Structure (Cube)
+        // ----------------------------------------------------------
+
+        // Upload vertices to device
+        CUdeviceptr d_vertices;
+        CUDA_CHECK(cudaMalloc((void**)&d_vertices, sizeof(vertices)));
+        CUDA_CHECK(cudaMemcpy((void*)d_vertices, vertices, sizeof(vertices), cudaMemcpyHostToDevice));
+
+        // Upload indices to device
+        CUdeviceptr d_indices;
+        CUDA_CHECK(cudaMalloc((void**)&d_indices, sizeof(indices)));
+        CUDA_CHECK(cudaMemcpy((void*)d_indices, indices, sizeof(indices), cudaMemcpyHostToDevice));
+
+        // Setup triangle input
+        OptixBuildInput triangle_input = {};
+        triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+
+        triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        triangle_input.triangleArray.vertexStrideInBytes = sizeof(float3);
+        triangle_input.triangleArray.numVertices = 8;
+        triangle_input.triangleArray.vertexBuffers = &d_vertices;
+
+        triangle_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        triangle_input.triangleArray.indexStrideInBytes = sizeof(uint3);
+        triangle_input.triangleArray.numIndexTriplets = 12;
+        triangle_input.triangleArray.indexBuffer = d_indices;
+
+        unsigned int triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        triangle_input.triangleArray.flags = triangle_input_flags;
+        triangle_input.triangleArray.numSbtRecords = 1;
+
+        // Setup acceleration structure build options
+        OptixAccelBuildOptions accel_options = {};
+        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+        accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+        // Query memory requirements
+        OptixAccelBufferSizes gas_buffer_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            context,
+            &accel_options,
+            &triangle_input,
+            1,
+            &gas_buffer_sizes
+        ));
+
+        // Allocate temporary buffers
+        CUdeviceptr d_temp_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_temp_buffer, gas_buffer_sizes.tempSizeInBytes));
+
+        CUdeviceptr d_gas_output_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_gas_output_buffer, gas_buffer_sizes.outputSizeInBytes));
+
+        // Build acceleration structure
+        OptixTraversableHandle gas_handle;
+        OPTIX_CHECK(optixAccelBuild(
+            context,
+            0,  // CUDA stream
+            &accel_options,
+            &triangle_input,
+            1,
+            d_temp_buffer,
+            gas_buffer_sizes.tempSizeInBytes,
+            d_gas_output_buffer,
+            gas_buffer_sizes.outputSizeInBytes,
+            &gas_handle,
+            nullptr,
+            0
+        ));
+
+        // Free temporary buffer (we don't need it anymore)
+        CUDA_CHECK(cudaFree((void*)d_temp_buffer));
+
+        std::cout << "Acceleration structure built successfully" << std::endl;
 
         // ----------------------------------------------------------
         // SBT
@@ -342,24 +426,35 @@ int main(){
             char header[OPTIX_SBT_RECORD_HEADER_SIZE];
         };
 
+        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) HitGroupRecord {
+            char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+        };
+
         RaygenRecord rg = {};
         MissRecord   ms = {};
+        HitGroupRecord hg = {};
 
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg));
 
-        CUdeviceptr d_rg, d_ms;
+        CUdeviceptr d_rg, d_ms, d_hg;
         CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(rg)));
         CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(ms)));
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(hg)));
 
         CUDA_CHECK(cudaMemcpy((void*)d_rg, &rg, sizeof(rg), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy((void*)d_hg, &hg, sizeof(hg), cudaMemcpyHostToDevice));
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;
         sbt.missRecordBase = d_ms;
         sbt.missRecordStrideInBytes = sizeof(MissRecord);
         sbt.missRecordCount = 1;
+        sbt.hitgroupRecordBase = d_hg;
+        sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
+        sbt.hitgroupRecordCount = 1;
 
         // ----------------------------------------------------------
         // Output buffer + Display
@@ -371,17 +466,18 @@ int main(){
         params.image = (uchar4*)d_pixels;
         params.width = width;
         params.height = height;
+        params.traversable = gas_handle;
 
         CUdeviceptr d_params;
         CUDA_CHECK(cudaMalloc((void**)&d_params, sizeof(Params)));
-        CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
+        //CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
         // Create display buffer
         ImGuiDisplayBuffer display(width, height);
 
         // Create camera
         CameraController camera_controller(
-            make_float3(0.0f, 0.0f, 3.0f),  // position
+            make_float3(0.0f, 1.0f, 3.0f),  // position
             make_float3(0.0f, 0.0f, 0.0f),  // look at
             make_float3(0.0f, 1.0f, 0.0f),  // up
             60.0f,                           // vfov
@@ -485,6 +581,10 @@ int main(){
         CUDA_CHECK(cudaFree((void*)d_params));
         CUDA_CHECK(cudaFree((void*)d_rg));
         CUDA_CHECK(cudaFree((void*)d_ms));
+        CUDA_CHECK(cudaFree((void*)d_hg));  
+        CUDA_CHECK(cudaFree((void*)d_vertices));  
+        CUDA_CHECK(cudaFree((void*)d_indices)); 
+        CUDA_CHECK(cudaFree((void*)d_gas_output_buffer)); 
     }
     catch (const std::exception& e){
         std::cerr << "Exception: " << e.what() << std::endl;
