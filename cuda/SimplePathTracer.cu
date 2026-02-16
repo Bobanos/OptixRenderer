@@ -130,7 +130,19 @@ extern "C" __global__ void __closesthit__ch()
     const float3 ray_direction = optixGetWorldRayDirection();
     const float3 hit_point = ray_origin + t_hit * ray_direction;
     
-    const float3 object_normal = make_float3(0, 1, 0);
+
+    // fetch current triangle vertices
+    float3 data[3];
+    optixGetTriangleVertexData( optixGetGASTraversableHandle(), optixGetPrimitiveIndex(), optixGetSbtGASIndex(),
+        optixGetRayTime(), data );
+
+    // compute triangle normal
+    data[1] = data[1] - data[0];
+    data[2] = data[2] - data[0];
+    float3 object_normal = make_float3(
+        data[1].y*data[2].z - data[1].z*data[2].y,
+        data[1].z*data[2].x - data[1].x*data[2].z,
+        data[1].x*data[2].y - data[1].y*data[2].x );
     
     float3 world_normal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
     
