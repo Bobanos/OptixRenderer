@@ -151,38 +151,44 @@ extern "C" __global__ void __closesthit__ch()
         world_normal = world_normal * -1.0f;;
     }
     
-    // Calculate lighting
-    float3 to_light = params.light_position - hit_point;
-    float distance_to_light = length(to_light);
-    float3 light_dir = normalize(to_light);
-    
-    // Trace shadow ray
-    unsigned int shadow_hit = 0;
-    optixTrace(
-        params.traversable,
-        hit_point + world_normal * 0.001f,  // Offset to avoid self-intersection
-        light_dir,
-        0.001f,                              // tmin
-        distance_to_light - 0.001f,         // tmax (stop at light)
-        0.0f,
-        OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
-        0,
-        1,
-        0,
-        shadow_hit  // Payload: will be set to 1 if hit
-    );
-    
-    float shadow = shadow_hit ? 1.0f : 0.0f;  // 1 = in shadow, 0 = lit
-    
-    // Calculate color
-    float ndotl = fmaxf(0.0f, dot(world_normal, light_dir));
-    float attenuation = 1.0f / (1.0f + 0.1f * distance_to_light);
+    // Accumulate lighting from all lights
+    float3 total_diffuse = make_float3(0.0f, 0.0f, 0.0f);
+
+    for (int light_idx = 0; light_idx < params.num_lights; light_idx++) {
+        // Calculate lighting for this light
+        float3 to_light = params.light_position[light_idx] - hit_point;
+        float distance_to_light = length(to_light);
+        float3 light_dir = normalize(to_light);
+        
+        // Trace shadow ray
+        unsigned int shadow_hit = 0;
+        optixTrace(
+            params.traversable,
+            hit_point + world_normal * 0.001f,
+            light_dir,
+            0.001f,
+            distance_to_light - 0.001f,
+            0.0f,
+            OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
+            0,
+            1,
+            0,
+            shadow_hit
+        );
+        
+        float shadow = shadow_hit ? 1.0f : 0.0f;
+        
+        // Calculate contribution from this light
+        float ndotl = fmaxf(0.0f, dot(world_normal, light_dir));
+        float attenuation = 1.0f / (1.0f + 0.1f * distance_to_light);
+        
+        total_diffuse = total_diffuse + params.light_color[light_idx] * ndotl * attenuation * shadow;
+    }
     
     float3 base_color = make_float3(0.8f, 0.8f, 0.8f);
     float3 ambient = make_float3(0.1f, 0.1f, 0.1f);
-    float3 diffuse = params.light_color * base_color * ndotl * attenuation * shadow;
-    float3 color = ambient + diffuse;
+    float3 color = ambient + base_color * total_diffuse;
     
     // Clamp to valid range
     color = clamp(color, 0.0f, 1.0f);

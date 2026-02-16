@@ -26,7 +26,7 @@ const int width = 800;
 const int height = 600;
 
 const int window_width = 1200;
-const int window_height = 800;
+const int window_height = 1000;
 
 // Camera instance (global for mouse callback)
 CameraController* g_camera = nullptr;
@@ -352,11 +352,15 @@ int main(){
         // Build Geometry Acceleration Structure (Cube)
         // ----------------------------------------------------------
 
+        float3 vertices2[8];
+
         for (int i = 0; i<(sizeof(vertices)/sizeof(float3));i++) {
             vertices[i].y = vertices[i].y + 2;
+            vertices2[i] = vertices[i];
+            vertices2[i].x = vertices2[i].x + 2;
         }
 
-        // Upload vertices to device
+        // Upload vertices of cube1 to device
         CUdeviceptr d_vertices;
         CUDA_CHECK(cudaMalloc((void**)&d_vertices, sizeof(vertices)));
         CUDA_CHECK(cudaMemcpy((void*)d_vertices, vertices, sizeof(vertices), cudaMemcpyHostToDevice));
@@ -366,18 +370,23 @@ int main(){
         CUDA_CHECK(cudaMalloc((void**)&d_indices, sizeof(indices)));
         CUDA_CHECK(cudaMemcpy((void*)d_indices, indices, sizeof(indices), cudaMemcpyHostToDevice));
 
-        // Upload vertices to device
+        // Upload vertices of cube2 to device
+        CUdeviceptr d_vertices2;
+        CUDA_CHECK(cudaMalloc((void**)&d_vertices2, sizeof(vertices2)));
+        CUDA_CHECK(cudaMemcpy((void*)d_vertices2, vertices2, sizeof(vertices2), cudaMemcpyHostToDevice));
+
+        // Upload vertices of plane to device
         CUdeviceptr d_ground_vertices;
         CUDA_CHECK(cudaMalloc((void**)&d_ground_vertices, sizeof(ground_vertices)));
         CUDA_CHECK(cudaMemcpy((void*)d_ground_vertices, ground_vertices, sizeof(ground_vertices), cudaMemcpyHostToDevice));
 
-        // Upload indices to device
+        // Upload indices of plane to device
         CUdeviceptr d_ground_indices;
         CUDA_CHECK(cudaMalloc((void**)&d_ground_indices, sizeof(ground_indices)));
         CUDA_CHECK(cudaMemcpy((void*)d_ground_indices, ground_indices, sizeof(ground_indices), cudaMemcpyHostToDevice));
 
         // Setup triangle input
-        OptixBuildInput triangle_input[2] = {};
+        OptixBuildInput triangle_input[3] = {};
 
         triangle_input[0].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
         triangle_input[0].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
@@ -395,22 +404,37 @@ int main(){
         triangle_input[1].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
         triangle_input[1].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
         triangle_input[1].triangleArray.vertexStrideInBytes = sizeof(float3);
-        triangle_input[1].triangleArray.numVertices = 4;
-        triangle_input[1].triangleArray.vertexBuffers = &d_ground_vertices;
+        triangle_input[1].triangleArray.numVertices = 8;
+        triangle_input[1].triangleArray.vertexBuffers = &d_vertices2;
         triangle_input[1].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
         triangle_input[1].triangleArray.indexStrideInBytes = sizeof(uint3);
-        triangle_input[1].triangleArray.numIndexTriplets = 2;
-        triangle_input[1].triangleArray.indexBuffer = d_ground_indices;
-        unsigned int ground_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-        triangle_input[1].triangleArray.flags = ground_flags;
+        triangle_input[1].triangleArray.numIndexTriplets = 12;
+        triangle_input[1].triangleArray.indexBuffer = d_indices;
+        unsigned int cube2_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        triangle_input[1].triangleArray.flags = cube2_flags;
         triangle_input[1].triangleArray.numSbtRecords = 1;
+
+        triangle_input[2].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        triangle_input[2].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        triangle_input[2].triangleArray.vertexStrideInBytes = sizeof(float3);
+        triangle_input[2].triangleArray.numVertices = 4;
+        triangle_input[2].triangleArray.vertexBuffers = &d_ground_vertices;
+        triangle_input[2].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        triangle_input[2].triangleArray.indexStrideInBytes = sizeof(uint3);
+        triangle_input[2].triangleArray.numIndexTriplets = 2;
+        triangle_input[2].triangleArray.indexBuffer = d_ground_indices;
+        unsigned int ground_flags[2] = { OPTIX_GEOMETRY_FLAG_NONE };
+        triangle_input[2].triangleArray.flags = ground_flags;
+        triangle_input[2].triangleArray.numSbtRecords = 1;
 
 
 
         // Setup acceleration structure build options
         OptixAccelBuildOptions accel_options = {};
         accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS;
         accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+        
 
         // Query memory requirements
         OptixAccelBufferSizes gas_buffer_sizes;
@@ -418,7 +442,7 @@ int main(){
             context,
             &accel_options,
             triangle_input,
-            2,  //num of geometries
+            3,  //num of geometries
             &gas_buffer_sizes
         ));
 
@@ -436,7 +460,7 @@ int main(){
             0,  // CUDA stream
             &accel_options,
             triangle_input,
-            2,  //num of geometries
+            3,  //num of geometries
             d_temp_buffer,
             gas_buffer_sizes.tempSizeInBytes,
             d_gas_output_buffer,
@@ -469,23 +493,26 @@ int main(){
         RaygenRecord rg = {};
         MissRecord   ms = {};
         HitGroupRecord hg_cube = {};
+        HitGroupRecord hg_cube2 = {};
         HitGroupRecord hg_ground = {};
 
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_cube));
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_cube2));
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_ground));
 
         CUdeviceptr d_rg, d_ms, d_hg;
         CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(rg)));
         CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(ms)));
-        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(hg_cube) + sizeof(hg_ground)));
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(HitGroupRecord) * 3));
 
         CUDA_CHECK(cudaMemcpy((void*)d_rg, &rg, sizeof(rg), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
         CUDA_CHECK(cudaMemcpy((void*)(d_hg + 0 * sizeof(HitGroupRecord)), &hg_cube, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 1 * sizeof(HitGroupRecord)), &hg_ground, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 1 * sizeof(HitGroupRecord)), &hg_cube2, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 2 * sizeof(HitGroupRecord)), &hg_ground, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
 
 
         OptixShaderBindingTable sbt = {};
@@ -495,7 +522,7 @@ int main(){
         sbt.missRecordCount = 1;
         sbt.hitgroupRecordBase = d_hg;
         sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt.hitgroupRecordCount = 2;
+        sbt.hitgroupRecordCount = 3;
 
         // ----------------------------------------------------------
         // Output buffer + Display
@@ -508,8 +535,12 @@ int main(){
         params.width = width;
         params.height = height;
         params.traversable = gas_handle;
-        params.light_position = make_float3(2.0f, 3.0f, 2.0f);
-        params.light_color = make_float3(1.0f, 1.0f, 1.0f);
+        params.light_position[0] = make_float3(2.0f, 3.0f, 2.0f);
+        params.light_color[0] = make_float3(1.0f, 0.4f, 0.4f);
+
+        params.light_position[1] = make_float3(2.0f, 3.0f, -2.0f);
+        params.light_color[1] = make_float3(0.4f, 0.4f, 1.0f);
+        params.num_lights = 2;
 
         CUdeviceptr d_params;
         CUDA_CHECK(cudaMalloc((void**)&d_params, sizeof(Params)));
@@ -520,8 +551,8 @@ int main(){
 
         // Create camera
         CameraController camera_controller(
-            make_float3(0.0f, 1.0f, 3.0f),  // position
-            make_float3(0.0f, 0.0f, 0.0f),  // look at
+            make_float3(0.0f, 5.0f, 8.0f),  // position
+            make_float3(0.0f, -4.0f, 0.0f),  // look at
             make_float3(0.0f, 1.0f, 0.0f),  // up
             60.0f,                           // vfov
             (float)width / (float)height    // aspect ratio
@@ -606,15 +637,34 @@ int main(){
             // Light control
             ImGui::Begin("Light Controls");
 
-            static float light_pos[3] = { 2.0f, 3.0f, 2.0f };
-            static float light_col[3] = { 1.0f, 1.0f, 1.0f };
+            static float light1_pos[3] = { 2.0f, 3.0f, 2.0f };
+            static float light1_col[3] = { 1.0f, 0.4f, 0.4f };
+            static float light2_pos[3] = { 2.0f, 3.0f, -2.0f };
+            static float light2_col[3] = { 0.4f, 0.4f, 1.0f };
 
-            if (ImGui::DragFloat3("Light Position", light_pos, 0.1f, -10.0f, 10.0f)) {
-                params.light_position = make_float3(light_pos[0], light_pos[1], light_pos[2]);
+            // Disable interaction when camera is captured
+            if (g_mouse_captured) {
+                ImGui::BeginDisabled();
             }
 
-            if (ImGui::ColorEdit3("Light Color", light_col)) {
-                params.light_color = make_float3(light_col[0], light_col[1], light_col[2]);
+            ImGui::Text("Light 1");
+            if (ImGui::DragFloat3("Light Position 1", light1_pos, 0.1f, -10.0f, 10.0f), ImGuiSliderFlags_NoInput) {
+                params.light_position[0] = make_float3(light1_pos[0], light1_pos[1], light1_pos[2]);
+            }
+            if (ImGui::ColorEdit3("Light Color 1", light1_col), ImGuiSliderFlags_NoInput) {
+                params.light_color[0] = make_float3(light1_col[0], light1_col[1], light1_col[2]);
+            }
+            ImGui::Separator();
+            ImGui::Text("Light 2");
+            if (ImGui::DragFloat3("Light Position 2", light2_pos, 0.1f, -10.0f, 10.0f), ImGuiSliderFlags_NoInput) {
+                params.light_position[1] = make_float3(light2_pos[0], light2_pos[1], light2_pos[2]);
+            }
+            if (ImGui::ColorEdit3("Light Color 2", light2_col), ImGuiSliderFlags_NoInput) {
+                params.light_color[1] = make_float3(light2_col[0], light2_col[1], light2_col[2]);
+            }
+
+            if (g_mouse_captured) {
+                ImGui::EndDisabled();
             }
 
             ImGui::End();
@@ -643,6 +693,7 @@ int main(){
         CUDA_CHECK(cudaFree((void*)d_hg));  
         CUDA_CHECK(cudaFree((void*)d_vertices));  
         CUDA_CHECK(cudaFree((void*)d_indices)); 
+        CUDA_CHECK(cudaFree((void*)d_vertices2));
         CUDA_CHECK(cudaFree((void*)d_ground_vertices));
         CUDA_CHECK(cudaFree((void*)d_ground_indices));
         CUDA_CHECK(cudaFree((void*)d_gas_output_buffer)); 
