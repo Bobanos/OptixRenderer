@@ -70,6 +70,15 @@ uint3 indices[12] = {
     {1,5,6}, {1,6,2}   // Right
 };
 
+float3 ground_vertices[4] = {
+    {-5.0f, 0.0f, -5.0f}, {5.0f, 0.0f, -5.0f},
+    {5.0f, 0.0f,  5.0f}, {-5.0f, 0.0f,  5.0f}
+};
+
+uint3 ground_indices[2] = {
+    {0, 1, 2}, {0, 2, 3}  // Two triangles for the quad
+};
+
 // ------------------------------------------------------------------
 // Callbacks and input processing
 // ------------------------------------------------------------------
@@ -324,7 +333,7 @@ int main(){
         OptixProgramGroup groups[] = { raygen_pg, miss_pg , hitgroup_pg };
 
         OptixPipelineLinkOptions link_opts = {};
-        link_opts.maxTraceDepth = 1;
+        link_opts.maxTraceDepth = 2;
 
         OptixPipeline pipeline = nullptr;
         OPTIX_CHECK(optixPipelineCreate(
@@ -340,8 +349,12 @@ int main(){
 
 
         // ----------------------------------------------------------
-        // Build Acceleration Structure (Cube)
+        // Build Geometry Acceleration Structure (Cube)
         // ----------------------------------------------------------
+
+        for (int i = 0; i<(sizeof(vertices)/sizeof(float3));i++) {
+            vertices[i].y = vertices[i].y + 2;
+        }
 
         // Upload vertices to device
         CUdeviceptr d_vertices;
@@ -353,23 +366,46 @@ int main(){
         CUDA_CHECK(cudaMalloc((void**)&d_indices, sizeof(indices)));
         CUDA_CHECK(cudaMemcpy((void*)d_indices, indices, sizeof(indices), cudaMemcpyHostToDevice));
 
+        // Upload vertices to device
+        CUdeviceptr d_ground_vertices;
+        CUDA_CHECK(cudaMalloc((void**)&d_ground_vertices, sizeof(ground_vertices)));
+        CUDA_CHECK(cudaMemcpy((void*)d_ground_vertices, ground_vertices, sizeof(ground_vertices), cudaMemcpyHostToDevice));
+
+        // Upload indices to device
+        CUdeviceptr d_ground_indices;
+        CUDA_CHECK(cudaMalloc((void**)&d_ground_indices, sizeof(ground_indices)));
+        CUDA_CHECK(cudaMemcpy((void*)d_ground_indices, ground_indices, sizeof(ground_indices), cudaMemcpyHostToDevice));
+
         // Setup triangle input
-        OptixBuildInput triangle_input = {};
-        triangle_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        OptixBuildInput triangle_input[2] = {};
 
-        triangle_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-        triangle_input.triangleArray.vertexStrideInBytes = sizeof(float3);
-        triangle_input.triangleArray.numVertices = 8;
-        triangle_input.triangleArray.vertexBuffers = &d_vertices;
+        triangle_input[0].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        triangle_input[0].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        triangle_input[0].triangleArray.vertexStrideInBytes = sizeof(float3);
+        triangle_input[0].triangleArray.numVertices = 8;
+        triangle_input[0].triangleArray.vertexBuffers = &d_vertices;
+        triangle_input[0].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        triangle_input[0].triangleArray.indexStrideInBytes = sizeof(uint3);
+        triangle_input[0].triangleArray.numIndexTriplets = 12;
+        triangle_input[0].triangleArray.indexBuffer = d_indices;
+        unsigned int cube_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        triangle_input[0].triangleArray.flags = cube_flags;
+        triangle_input[0].triangleArray.numSbtRecords = 1;
 
-        triangle_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-        triangle_input.triangleArray.indexStrideInBytes = sizeof(uint3);
-        triangle_input.triangleArray.numIndexTriplets = 12;
-        triangle_input.triangleArray.indexBuffer = d_indices;
+        triangle_input[1].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        triangle_input[1].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        triangle_input[1].triangleArray.vertexStrideInBytes = sizeof(float3);
+        triangle_input[1].triangleArray.numVertices = 4;
+        triangle_input[1].triangleArray.vertexBuffers = &d_ground_vertices;
+        triangle_input[1].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        triangle_input[1].triangleArray.indexStrideInBytes = sizeof(uint3);
+        triangle_input[1].triangleArray.numIndexTriplets = 2;
+        triangle_input[1].triangleArray.indexBuffer = d_ground_indices;
+        unsigned int ground_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        triangle_input[1].triangleArray.flags = ground_flags;
+        triangle_input[1].triangleArray.numSbtRecords = 1;
 
-        unsigned int triangle_input_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-        triangle_input.triangleArray.flags = triangle_input_flags;
-        triangle_input.triangleArray.numSbtRecords = 1;
+
 
         // Setup acceleration structure build options
         OptixAccelBuildOptions accel_options = {};
@@ -381,8 +417,8 @@ int main(){
         OPTIX_CHECK(optixAccelComputeMemoryUsage(
             context,
             &accel_options,
-            &triangle_input,
-            1,
+            triangle_input,
+            2,  //num of geometries
             &gas_buffer_sizes
         ));
 
@@ -399,8 +435,8 @@ int main(){
             context,
             0,  // CUDA stream
             &accel_options,
-            &triangle_input,
-            1,
+            triangle_input,
+            2,  //num of geometries
             d_temp_buffer,
             gas_buffer_sizes.tempSizeInBytes,
             d_gas_output_buffer,
@@ -432,20 +468,25 @@ int main(){
 
         RaygenRecord rg = {};
         MissRecord   ms = {};
-        HitGroupRecord hg = {};
+        HitGroupRecord hg_cube = {};
+        HitGroupRecord hg_ground = {};
 
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg));
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_cube));
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_ground));
 
         CUdeviceptr d_rg, d_ms, d_hg;
         CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(rg)));
         CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(ms)));
-        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(hg)));
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(hg_cube) + sizeof(hg_ground)));
 
         CUDA_CHECK(cudaMemcpy((void*)d_rg, &rg, sizeof(rg), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy((void*)d_hg, &hg, sizeof(hg), cudaMemcpyHostToDevice));
+
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 0 * sizeof(HitGroupRecord)), &hg_cube, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 1 * sizeof(HitGroupRecord)), &hg_ground, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
+
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;
@@ -454,7 +495,7 @@ int main(){
         sbt.missRecordCount = 1;
         sbt.hitgroupRecordBase = d_hg;
         sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt.hitgroupRecordCount = 1;
+        sbt.hitgroupRecordCount = 2;
 
         // ----------------------------------------------------------
         // Output buffer + Display
@@ -467,6 +508,8 @@ int main(){
         params.width = width;
         params.height = height;
         params.traversable = gas_handle;
+        params.light_position = make_float3(2.0f, 3.0f, 2.0f);
+        params.light_color = make_float3(1.0f, 1.0f, 1.0f);
 
         CUdeviceptr d_params;
         CUDA_CHECK(cudaMalloc((void**)&d_params, sizeof(Params)));
@@ -542,7 +585,7 @@ int main(){
             );
             ImGui::End();
 
-            // Camera Controls window - CHANGED: Updated with camera info
+            // Camera Controls window
             ImGui::Begin("Camera Controls");
             ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
             ImGui::Text("Press TAB to toggle camera control");
@@ -558,6 +601,22 @@ int main(){
             ImGui::BulletText("Q/E: Down/Up");
             ImGui::BulletText("Mouse: Look around");
             ImGui::BulletText("Scroll: Adjust speed");
+            ImGui::End();
+
+            // Light control
+            ImGui::Begin("Light Controls");
+
+            static float light_pos[3] = { 2.0f, 3.0f, 2.0f };
+            static float light_col[3] = { 1.0f, 1.0f, 1.0f };
+
+            if (ImGui::DragFloat3("Light Position", light_pos, 0.1f, -10.0f, 10.0f)) {
+                params.light_position = make_float3(light_pos[0], light_pos[1], light_pos[2]);
+            }
+
+            if (ImGui::ColorEdit3("Light Color", light_col)) {
+                params.light_color = make_float3(light_col[0], light_col[1], light_col[2]);
+            }
+
             ImGui::End();
 
             // Render ImGui
@@ -584,6 +643,8 @@ int main(){
         CUDA_CHECK(cudaFree((void*)d_hg));  
         CUDA_CHECK(cudaFree((void*)d_vertices));  
         CUDA_CHECK(cudaFree((void*)d_indices)); 
+        CUDA_CHECK(cudaFree((void*)d_ground_vertices));
+        CUDA_CHECK(cudaFree((void*)d_ground_indices));
         CUDA_CHECK(cudaFree((void*)d_gas_output_buffer)); 
     }
     catch (const std::exception& e){

@@ -18,4 +18,6 @@ struct Params {
     int     height;
     Camera  camera;
     OptixTraversableHandle traversable;
+    float3  light_position;
+    float3  light_color;
 };
