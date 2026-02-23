@@ -28,6 +28,17 @@ const int height = 600;
 const int window_width = 1200;
 const int window_height = 1000;
 
+template <typename T>
+struct Record
+{
+    __align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+    T data;
+};
+
+typedef Record<RayGenData>   RayGenRecord;
+typedef Record<MissData>     MissRecord;
+typedef Record<HitGroupData> HitGroupRecord;
+
 // Camera instance (global for mouse callback)
 CameraController* g_camera = nullptr;
 bool g_mouse_captured = false;
@@ -267,7 +278,7 @@ int main(){
         // ----------------------------------------------------------
         // Module
         // ----------------------------------------------------------
-        auto ir = loadFile("../generated/optixir/SimplePathTracer.optixir");
+        auto ir = loadFile("generated/optixir/SimplePathTracer.optixir");
 
         OptixModuleCompileOptions module_opts = {};
         module_opts.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
@@ -478,42 +489,33 @@ int main(){
         // ----------------------------------------------------------
         // SBT
         // ----------------------------------------------------------
-        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) RaygenRecord{
-            char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-        };
-
-        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) MissRecord{
-            char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-        };
-
-        struct __align__(OPTIX_SBT_RECORD_ALIGNMENT) HitGroupRecord {
-            char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-        };
-
-        RaygenRecord rg = {};
-        MissRecord   ms = {};
-        HitGroupRecord hg_cube = {};
-        HitGroupRecord hg_cube2 = {};
-        HitGroupRecord hg_ground = {};
-
+        CUdeviceptr d_rg;
+        const size_t raygen_record_size = sizeof(RayGenRecord);
+        CUDA_CHECK(cudaMalloc((void**)&d_rg, raygen_record_size));
+        RayGenRecord rg = {};
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
-        OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_cube));
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_cube2));
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_ground));
-
-        CUdeviceptr d_rg, d_ms, d_hg;
-        CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(rg)));
-        CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(ms)));
-        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(HitGroupRecord) * 3));
-
         CUDA_CHECK(cudaMemcpy((void*)d_rg, &rg, sizeof(rg), cudaMemcpyHostToDevice));
+
+        CUdeviceptr d_ms;
+        const size_t miss_record_size = sizeof(MissRecord);
+        CUDA_CHECK(cudaMalloc((void**)&d_ms, miss_record_size));
+        MissRecord   ms = {};
+        OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 0 * sizeof(HitGroupRecord)), &hg_cube, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 1 * sizeof(HitGroupRecord)), &hg_cube2, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy((void*)(d_hg + 2 * sizeof(HitGroupRecord)), &hg_ground, sizeof(HitGroupRecord), cudaMemcpyHostToDevice));
+        CUdeviceptr d_hg;
+        const size_t hit_record_size = sizeof(HitGroupRecord);
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, hit_record_size * 3));
 
+        HitGroupRecord hg[3];
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[0]));
+        hg[0].data.diffuse_color = make_float3(0.8f, 0.2f, 0.2f);
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[1]));
+        hg[1].data.diffuse_color = make_float3(0.2f, 0.8f, 0.2f);
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[2]));
+        hg[2].data.diffuse_color = make_float3(0.6f, 0.6f, 0.6f);
+
+        CUDA_CHECK(cudaMemcpy((void*)d_hg, &hg, sizeof(HitGroupRecord) * 3, cudaMemcpyHostToDevice));
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;

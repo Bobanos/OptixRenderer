@@ -186,7 +186,19 @@ extern "C" __global__ void __closesthit__ch()
         total_diffuse = total_diffuse + params.light_color[light_idx] * ndotl * attenuation * shadow;
     }
     
-    float3 base_color = make_float3(0.8f, 0.8f, 0.8f);
+
+
+
+    const HitGroupData* sbt_data = (HitGroupData*)optixGetSbtDataPointer();
+    //const int    prim_idx        = optixGetPrimitiveIndex();
+    //const int    vert_idx_offset = prim_idx*3;
+    float3 base_color = sbt_data->diffuse_color;
+
+    if (length_squared(base_color) < 0.001f) {
+        base_color = make_float3(1.0f, 0.0f, 1.0f);  // Magenta = error indicator
+    }
+
+
     float3 ambient = make_float3(0.1f, 0.1f, 0.1f);
     float3 color = ambient + base_color * total_diffuse;
     
