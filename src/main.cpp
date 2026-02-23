@@ -267,7 +267,7 @@ int main(){
         // ----------------------------------------------------------
         // Module
         // ----------------------------------------------------------
-        auto ir = loadFile("generated/optixir/SimplePathTracer.optixir");
+        auto ir = loadFile("../generated/optixir/SimplePathTracer.optixir");
 
         OptixModuleCompileOptions module_opts = {};
         module_opts.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
