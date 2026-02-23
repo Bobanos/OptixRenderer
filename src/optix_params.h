@@ -23,6 +23,8 @@ struct Params {
     float3  light_position[2];
     float3  light_color[2];
     int     num_lights;
+
+    int max_recursion_depth;
 };
 
 struct RayGenData
@@ -32,13 +34,12 @@ struct RayGenData
 
 struct MissData
 {
-    //float4 bg_color;
+    
 };
 
 
 struct HitGroupData
 {
-    //float3  emission_color;
     float3  diffuse_color;
-    //float4* vertices;
+    float   refraction_index;  // For glass material (1.0 = opaque, 1.5 = glass)
 };

@@ -62,7 +62,7 @@ static std::vector<char> loadFile(const std::string& path){
 }
 
 // ------------------------------------------------------------------
-// Geometry data for a cube
+// Geometry data and Transforms
 // ------------------------------------------------------------------
 
 float3 vertices[8] = {
@@ -89,6 +89,15 @@ float3 ground_vertices[4] = {
 uint3 ground_indices[2] = {
     {0, 1, 2}, {0, 2, 3}  // Two triangles for the quad
 };
+
+// Helper function to create a 3x4 transform matrix
+void createTransformMatrix(float3 translation, float3 scale, float transform[12]) {
+    // Create a simple transform: scale and translate
+    // Row-major 3x4 matrix [R|T] where R is 3x3 rotation/scale, T is translation
+    transform[0] = scale.x;  transform[1] = 0.0f;     transform[2] = 0.0f;     transform[3] = translation.x;
+    transform[4] = 0.0f;     transform[5] = scale.y;  transform[6] = 0.0f;     transform[7] = translation.y;
+    transform[8] = 0.0f;     transform[9] = 0.0f;     transform[10] = scale.z;  transform[11] = translation.z;
+}
 
 // ------------------------------------------------------------------
 // Callbacks and input processing
@@ -285,9 +294,9 @@ int main(){
         module_opts.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
 
         OptixPipelineCompileOptions pipeline_opts = {};
-        pipeline_opts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+        pipeline_opts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
         pipeline_opts.usesMotionBlur = false;
-        pipeline_opts.numPayloadValues = 3; //3 for RGB color
+        pipeline_opts.numPayloadValues = 4; //3 + 1(RGB + depth)
         pipeline_opts.numAttributeValues = 2; //2 for barycentrics
         pipeline_opts.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
         pipeline_opts.pipelineLaunchParamsVariableName = "params";
@@ -314,37 +323,43 @@ int main(){
         // Program groups
         // ----------------------------------------------------------
         OptixProgramGroup raygen_pg = nullptr;
-        OptixProgramGroup miss_pg = nullptr;
-        OptixProgramGroup hitgroup_pg = nullptr;
-
         OptixProgramGroupDesc rg_desc = {};
         rg_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
         rg_desc.raygen.module = module;
         rg_desc.raygen.entryFunctionName = "__raygen__rg";
 
+        OptixProgramGroup miss_pg = nullptr;
         OptixProgramGroupDesc ms_desc = {};
         ms_desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
         ms_desc.miss.module = module;
         ms_desc.miss.entryFunctionName = "__miss__ms";
 
+        OptixProgramGroup hitgroup_pg = nullptr;
         OptixProgramGroupDesc hg_desc = {};
         hg_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
         hg_desc.hitgroup.moduleCH = module;
         hg_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+
+        OptixProgramGroup hitgroup_glass_pg = nullptr;
+        OptixProgramGroupDesc hg_glass_desc = {};
+        hg_glass_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        hg_glass_desc.hitgroup.moduleCH = module;
+        hg_glass_desc.hitgroup.entryFunctionNameCH = "__closesthit__glass";
 
         OptixProgramGroupOptions pg_opts = {};
 
         OPTIX_CHECK(optixProgramGroupCreate(context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
         OPTIX_CHECK(optixProgramGroupCreate(context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
         OPTIX_CHECK(optixProgramGroupCreate(context, &hg_desc, 1, &pg_opts, log, &logSize, &hitgroup_pg));
+        OPTIX_CHECK(optixProgramGroupCreate(context, &hg_glass_desc, 1, &pg_opts, log, &logSize, &hitgroup_glass_pg));
 
         // ----------------------------------------------------------
         // Pipeline
         // ----------------------------------------------------------
-        OptixProgramGroup groups[] = { raygen_pg, miss_pg , hitgroup_pg };
+        OptixProgramGroup groups[] = { raygen_pg, miss_pg , hitgroup_pg, hitgroup_glass_pg };
 
         OptixPipelineLinkOptions link_opts = {};
-        link_opts.maxTraceDepth = 2;
+        link_opts.maxTraceDepth = 8; //TODO fix shadow ray -> refraction exceding max trace depth bug
 
         OptixPipeline pipeline = nullptr;
         OPTIX_CHECK(optixPipelineCreate(
@@ -352,7 +367,7 @@ int main(){
             &pipeline_opts,
             &link_opts,
             groups,
-            3,
+            4,
             log,
             &logSize,
             &pipeline
@@ -360,131 +375,263 @@ int main(){
 
 
         // ----------------------------------------------------------
-        // Build Geometry Acceleration Structure (Cube)
+        // Build Geometry Acceleration Structure
         // ----------------------------------------------------------
 
-        float3 vertices2[8];
-
-        for (int i = 0; i<(sizeof(vertices)/sizeof(float3));i++) {
-            vertices[i].y = vertices[i].y + 2;
-            vertices2[i] = vertices[i];
-            vertices2[i].x = vertices2[i].x + 2;
-        }
-
-        // Upload vertices of cube1 to device
+        // Upload cube vertices to device
         CUdeviceptr d_vertices;
         CUDA_CHECK(cudaMalloc((void**)&d_vertices, sizeof(vertices)));
         CUDA_CHECK(cudaMemcpy((void*)d_vertices, vertices, sizeof(vertices), cudaMemcpyHostToDevice));
 
-        // Upload indices to device
+        // Upload cube indices to device
         CUdeviceptr d_indices;
         CUDA_CHECK(cudaMalloc((void**)&d_indices, sizeof(indices)));
         CUDA_CHECK(cudaMemcpy((void*)d_indices, indices, sizeof(indices), cudaMemcpyHostToDevice));
 
-        // Upload vertices of cube2 to device
-        CUdeviceptr d_vertices2;
-        CUDA_CHECK(cudaMalloc((void**)&d_vertices2, sizeof(vertices2)));
-        CUDA_CHECK(cudaMemcpy((void*)d_vertices2, vertices2, sizeof(vertices2), cudaMemcpyHostToDevice));
-
-        // Upload vertices of plane to device
+        // Upload ground vertices  to device
         CUdeviceptr d_ground_vertices;
         CUDA_CHECK(cudaMalloc((void**)&d_ground_vertices, sizeof(ground_vertices)));
         CUDA_CHECK(cudaMemcpy((void*)d_ground_vertices, ground_vertices, sizeof(ground_vertices), cudaMemcpyHostToDevice));
 
-        // Upload indices of plane to device
+        // Upload ground indices  to device
         CUdeviceptr d_ground_indices;
         CUDA_CHECK(cudaMalloc((void**)&d_ground_indices, sizeof(ground_indices)));
         CUDA_CHECK(cudaMemcpy((void*)d_ground_indices, ground_indices, sizeof(ground_indices), cudaMemcpyHostToDevice));
 
-        // Setup triangle input
-        OptixBuildInput triangle_input[3] = {};
-
-        triangle_input[0].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-        triangle_input[0].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-        triangle_input[0].triangleArray.vertexStrideInBytes = sizeof(float3);
-        triangle_input[0].triangleArray.numVertices = 8;
-        triangle_input[0].triangleArray.vertexBuffers = &d_vertices;
-        triangle_input[0].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-        triangle_input[0].triangleArray.indexStrideInBytes = sizeof(uint3);
-        triangle_input[0].triangleArray.numIndexTriplets = 12;
-        triangle_input[0].triangleArray.indexBuffer = d_indices;
+        // ----------------------------------------------------------
+        // Build GAS for Cube
+        // ----------------------------------------------------------
+        OptixBuildInput cube_input = {};
+        cube_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        cube_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        cube_input.triangleArray.vertexStrideInBytes = sizeof(float3);
+        cube_input.triangleArray.numVertices = 8;
+        cube_input.triangleArray.vertexBuffers = &d_vertices;
+        cube_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        cube_input.triangleArray.indexStrideInBytes = sizeof(uint3);
+        cube_input.triangleArray.numIndexTriplets = 12;
+        cube_input.triangleArray.indexBuffer = d_indices;
         unsigned int cube_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-        triangle_input[0].triangleArray.flags = cube_flags;
-        triangle_input[0].triangleArray.numSbtRecords = 1;
-
-        triangle_input[1].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-        triangle_input[1].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-        triangle_input[1].triangleArray.vertexStrideInBytes = sizeof(float3);
-        triangle_input[1].triangleArray.numVertices = 8;
-        triangle_input[1].triangleArray.vertexBuffers = &d_vertices2;
-        triangle_input[1].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-        triangle_input[1].triangleArray.indexStrideInBytes = sizeof(uint3);
-        triangle_input[1].triangleArray.numIndexTriplets = 12;
-        triangle_input[1].triangleArray.indexBuffer = d_indices;
-        unsigned int cube2_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-        triangle_input[1].triangleArray.flags = cube2_flags;
-        triangle_input[1].triangleArray.numSbtRecords = 1;
-
-        triangle_input[2].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-        triangle_input[2].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-        triangle_input[2].triangleArray.vertexStrideInBytes = sizeof(float3);
-        triangle_input[2].triangleArray.numVertices = 4;
-        triangle_input[2].triangleArray.vertexBuffers = &d_ground_vertices;
-        triangle_input[2].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-        triangle_input[2].triangleArray.indexStrideInBytes = sizeof(uint3);
-        triangle_input[2].triangleArray.numIndexTriplets = 2;
-        triangle_input[2].triangleArray.indexBuffer = d_ground_indices;
-        unsigned int ground_flags[2] = { OPTIX_GEOMETRY_FLAG_NONE };
-        triangle_input[2].triangleArray.flags = ground_flags;
-        triangle_input[2].triangleArray.numSbtRecords = 1;
-
+        cube_input.triangleArray.flags = cube_flags;
+        cube_input.triangleArray.numSbtRecords = 1;
 
 
         // Setup acceleration structure build options
-        OptixAccelBuildOptions accel_options = {};
-        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
-        accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS;
-        accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+        OptixAccelBuildOptions cube_accel_options = {};
+        //cube_accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+        cube_accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS;
+        cube_accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
         
 
         // Query memory requirements
-        OptixAccelBufferSizes gas_buffer_sizes;
+        OptixAccelBufferSizes cube_gas_buffer_sizes;
         OPTIX_CHECK(optixAccelComputeMemoryUsage(
             context,
-            &accel_options,
-            triangle_input,
-            3,  //num of geometries
-            &gas_buffer_sizes
+            &cube_accel_options,
+            &cube_input,
+            1,  //num of geometries
+            &cube_gas_buffer_sizes
         ));
 
         // Allocate temporary buffers
-        CUdeviceptr d_temp_buffer;
-        CUDA_CHECK(cudaMalloc((void**)&d_temp_buffer, gas_buffer_sizes.tempSizeInBytes));
+        CUdeviceptr d_cube_temp_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_cube_temp_buffer, cube_gas_buffer_sizes.tempSizeInBytes));
 
-        CUdeviceptr d_gas_output_buffer;
-        CUDA_CHECK(cudaMalloc((void**)&d_gas_output_buffer, gas_buffer_sizes.outputSizeInBytes));
+        CUdeviceptr d_cube_gas_output_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_cube_gas_output_buffer, cube_gas_buffer_sizes.outputSizeInBytes));
 
         // Build acceleration structure
-        OptixTraversableHandle gas_handle;
+        OptixTraversableHandle cube_gas_handle;
         OPTIX_CHECK(optixAccelBuild(
             context,
-            0,  // CUDA stream
-            &accel_options,
-            triangle_input,
-            3,  //num of geometries
-            d_temp_buffer,
-            gas_buffer_sizes.tempSizeInBytes,
-            d_gas_output_buffer,
-            gas_buffer_sizes.outputSizeInBytes,
-            &gas_handle,
+            0,
+            &cube_accel_options,
+            &cube_input,
+            1,
+            d_cube_temp_buffer,
+            cube_gas_buffer_sizes.tempSizeInBytes,
+            d_cube_gas_output_buffer,
+            cube_gas_buffer_sizes.outputSizeInBytes,
+            &cube_gas_handle,
             nullptr,
             0
         ));
 
-        // Free temporary buffer (we don't need it anymore)
-        CUDA_CHECK(cudaFree((void*)d_temp_buffer));
+        CUDA_CHECK(cudaFree((void*)d_cube_temp_buffer));
+
+
+        // ----------------------------------------------------------
+        // Build GAS for Ground
+        // ----------------------------------------------------------
+        OptixBuildInput ground_input = {};
+        ground_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        ground_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        ground_input.triangleArray.vertexStrideInBytes = sizeof(float3);
+        ground_input.triangleArray.numVertices = 4;
+        ground_input.triangleArray.vertexBuffers = &d_ground_vertices;
+        ground_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        ground_input.triangleArray.indexStrideInBytes = sizeof(uint3);
+        ground_input.triangleArray.numIndexTriplets = 2;
+        ground_input.triangleArray.indexBuffer = d_ground_indices;
+        unsigned int ground_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        ground_input.triangleArray.flags = ground_flags;
+        ground_input.triangleArray.numSbtRecords = 1;
+
+        OptixAccelBuildOptions ground_accel_options = {};
+        ground_accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS;
+        ground_accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+        OptixAccelBufferSizes ground_gas_buffer_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            context,
+            &ground_accel_options,
+            &ground_input,
+            1,
+            &ground_gas_buffer_sizes
+        ));
+
+        CUdeviceptr d_ground_temp_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_ground_temp_buffer, ground_gas_buffer_sizes.tempSizeInBytes));
+
+        CUdeviceptr d_ground_gas_output_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_ground_gas_output_buffer, ground_gas_buffer_sizes.outputSizeInBytes));
+
+        OptixTraversableHandle ground_gas_handle;
+        OPTIX_CHECK(optixAccelBuild(
+            context,
+            0,
+            &ground_accel_options,
+            &ground_input,
+            1,
+            d_ground_temp_buffer,
+            ground_gas_buffer_sizes.tempSizeInBytes,
+            d_ground_gas_output_buffer,
+            ground_gas_buffer_sizes.outputSizeInBytes,
+            &ground_gas_handle,
+            nullptr,
+            0
+        ));
+
+        CUDA_CHECK(cudaFree((void*)d_ground_temp_buffer));
 
         std::cout << "Acceleration structure built successfully" << std::endl;
+
+        // ----------------------------------------------------------
+        // Create Instances with Transforms
+        // ----------------------------------------------------------
+        const int NUM_INSTANCES = 6;
+        OptixInstance instances[NUM_INSTANCES] = {};
+
+        // Instance 0: First cube at (0, 2, 0)
+        float transform0[12];
+        createTransformMatrix(make_float3(0.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform0);
+        memcpy(instances[0].transform, transform0, sizeof(float) * 12);
+        instances[0].instanceId = 0;
+        instances[0].sbtOffset = 0;
+        instances[0].visibilityMask = 255;
+        instances[0].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[0].traversableHandle = cube_gas_handle;
+
+        // Instance 1: Second cube at (2, 2, 0)
+        float transform1[12];
+        createTransformMatrix(make_float3(2.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform1);
+        memcpy(instances[1].transform, transform1, sizeof(float) * 12);
+        instances[1].instanceId = 1;
+        instances[1].sbtOffset = 1;
+        instances[1].visibilityMask = 255;
+        instances[1].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[1].traversableHandle = cube_gas_handle;
+
+        // Instance 2: Ground plane at (0, 0, 0)
+        float transform2[12];
+        createTransformMatrix(make_float3(0.0f, 0.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform2);
+        memcpy(instances[2].transform, transform2, sizeof(float) * 12);
+        instances[2].instanceId = 2;
+        instances[2].sbtOffset = 2;
+        instances[2].visibilityMask = 255;
+        instances[2].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[2].traversableHandle = ground_gas_handle;
+
+        // Instance 3: First glass cube at (-2, 2, 0)
+        float transform3[12];
+        createTransformMatrix(make_float3(-2.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform3);
+        memcpy(instances[3].transform, transform3, sizeof(float) * 12);
+        instances[3].instanceId = 3;
+        instances[3].sbtOffset = 3; // Uses glass shader (index 3)
+        instances[3].visibilityMask = 255;
+        instances[3].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[3].traversableHandle = cube_gas_handle;
+
+        // Instance 4: Second glass cube at (4, 2, 0)
+        float transform4[12];
+        createTransformMatrix(make_float3(4.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform4);
+        memcpy(instances[4].transform, transform4, sizeof(float) * 12);
+        instances[4].instanceId = 4;
+        instances[4].sbtOffset = 4; // Uses glass shader (index 4)
+        instances[4].visibilityMask = 255;
+        instances[4].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[4].traversableHandle = cube_gas_handle;
+
+        // Instance 5: Third glass cube at (1, 3, 0) - elevated
+        float transform5[12];
+        createTransformMatrix(make_float3(1.0f, 3.0f, 0.0f), make_float3(0.8f, 0.8f, 0.8f), transform5);
+        memcpy(instances[5].transform, transform5, sizeof(float) * 12);
+        instances[5].instanceId = 5;
+        instances[5].sbtOffset = 5; // Uses glass shader (index 5)
+        instances[5].visibilityMask = 255;
+        instances[5].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[5].traversableHandle = cube_gas_handle;
+
+        // Upload instances to device
+        CUdeviceptr d_instances;
+        CUDA_CHECK(cudaMalloc((void**)&d_instances, sizeof(OptixInstance)* NUM_INSTANCES));
+        CUDA_CHECK(cudaMemcpy((void*)d_instances, instances, sizeof(OptixInstance)* NUM_INSTANCES, cudaMemcpyHostToDevice));
+
+        // ----------------------------------------------------------
+        // Build IAS (Instance Acceleration Structure)
+        // ----------------------------------------------------------
+        OptixBuildInput instance_input = {};
+        instance_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+        instance_input.instanceArray.instances = d_instances;
+        instance_input.instanceArray.numInstances = NUM_INSTANCES;
+
+        OptixAccelBuildOptions ias_accel_options = {};
+        ias_accel_options.buildFlags = OPTIX_BUILD_FLAG_NONE;
+        ias_accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+        OptixAccelBufferSizes ias_buffer_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(
+            context,
+            &ias_accel_options,
+            &instance_input,
+            1,
+            &ias_buffer_sizes
+        ));
+
+        CUdeviceptr d_ias_temp_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_ias_temp_buffer, ias_buffer_sizes.tempSizeInBytes));
+
+        CUdeviceptr d_ias_output_buffer;
+        CUDA_CHECK(cudaMalloc((void**)&d_ias_output_buffer, ias_buffer_sizes.outputSizeInBytes));
+
+        OptixTraversableHandle ias_handle;
+        OPTIX_CHECK(optixAccelBuild(
+            context,
+            0,
+            &ias_accel_options,
+            &instance_input,
+            1,
+            d_ias_temp_buffer,
+            ias_buffer_sizes.tempSizeInBytes,
+            d_ias_output_buffer,
+            ias_buffer_sizes.outputSizeInBytes,
+            &ias_handle,
+            nullptr,
+            0
+        ));
+
+        CUDA_CHECK(cudaFree((void*)d_ias_temp_buffer));
+
 
         // ----------------------------------------------------------
         // SBT
@@ -503,19 +650,39 @@ int main(){
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
-        CUdeviceptr d_hg;
-        const size_t hit_record_size = sizeof(HitGroupRecord);
-        CUDA_CHECK(cudaMalloc((void**)&d_hg, hit_record_size * 3));
+        const int NUM_HIT_RECORDS = 6;
+        HitGroupRecord hg[NUM_HIT_RECORDS];
 
-        HitGroupRecord hg[3];
+        // Diffuse materials
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[0]));
         hg[0].data.diffuse_color = make_float3(0.8f, 0.2f, 0.2f);
+        hg[0].data.refraction_index = 1.0f; // Opaque
+
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[1]));
         hg[1].data.diffuse_color = make_float3(0.2f, 0.8f, 0.2f);
+        hg[1].data.refraction_index = 1.0f; // Opaque
+
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[2]));
         hg[2].data.diffuse_color = make_float3(0.6f, 0.6f, 0.6f);
+        hg[2].data.refraction_index = 1.0f; // Opaque (ground)
 
-        CUDA_CHECK(cudaMemcpy((void*)d_hg, &hg, sizeof(HitGroupRecord) * 3, cudaMemcpyHostToDevice));
+        // Glass materials
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg[3]));
+        hg[3].data.diffuse_color = make_float3(0.9f, 0.9f, 1.0f); // Slight blue tint
+        hg[3].data.refraction_index = 1.5f; // Glass IOR
+
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg[4]));
+        hg[4].data.diffuse_color = make_float3(1.0f, 0.9f, 0.9f); // Slight red tint
+        hg[4].data.refraction_index = 1.5f; // Glass IOR
+
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg[5]));
+        hg[5].data.diffuse_color = make_float3(0.9f, 1.0f, 0.9f); // Slight green tint
+        hg[5].data.refraction_index = 1.5f; // Glass IOR
+
+        CUdeviceptr d_hg;
+        const size_t hit_record_size = sizeof(HitGroupRecord);
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, hit_record_size * NUM_HIT_RECORDS));
+        CUDA_CHECK(cudaMemcpy((void*)d_hg, &hg, sizeof(HitGroupRecord) * NUM_HIT_RECORDS, cudaMemcpyHostToDevice));
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;
@@ -524,7 +691,7 @@ int main(){
         sbt.missRecordCount = 1;
         sbt.hitgroupRecordBase = d_hg;
         sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt.hitgroupRecordCount = 3;
+        sbt.hitgroupRecordCount = NUM_HIT_RECORDS;
 
         // ----------------------------------------------------------
         // Output buffer + Display
@@ -536,7 +703,7 @@ int main(){
         params.image = (uchar4*)d_pixels;
         params.width = width;
         params.height = height;
-        params.traversable = gas_handle;
+        params.traversable = ias_handle;
         params.light_position[0] = make_float3(2.0f, 3.0f, 2.0f);
         params.light_color[0] = make_float3(1.0f, 0.4f, 0.4f);
 
@@ -692,13 +859,15 @@ int main(){
         CUDA_CHECK(cudaFree((void*)d_params));
         CUDA_CHECK(cudaFree((void*)d_rg));
         CUDA_CHECK(cudaFree((void*)d_ms));
-        CUDA_CHECK(cudaFree((void*)d_hg));  
-        CUDA_CHECK(cudaFree((void*)d_vertices));  
-        CUDA_CHECK(cudaFree((void*)d_indices)); 
-        CUDA_CHECK(cudaFree((void*)d_vertices2));
+        CUDA_CHECK(cudaFree((void*)d_hg));
+        CUDA_CHECK(cudaFree((void*)d_vertices));
+        CUDA_CHECK(cudaFree((void*)d_indices));
         CUDA_CHECK(cudaFree((void*)d_ground_vertices));
         CUDA_CHECK(cudaFree((void*)d_ground_indices));
-        CUDA_CHECK(cudaFree((void*)d_gas_output_buffer)); 
+        CUDA_CHECK(cudaFree((void*)d_cube_gas_output_buffer));
+        CUDA_CHECK(cudaFree((void*)d_ground_gas_output_buffer));
+        CUDA_CHECK(cudaFree((void*)d_ias_output_buffer));
+        CUDA_CHECK(cudaFree((void*)d_instances));
     }
     catch (const std::exception& e){
         std::cerr << "Exception: " << e.what() << std::endl;
