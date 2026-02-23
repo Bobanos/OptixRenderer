@@ -519,7 +519,7 @@ int main(){
         // ----------------------------------------------------------
         // Create Instances with Transforms
         // ----------------------------------------------------------
-        const int NUM_INSTANCES = 6;
+        const int NUM_INSTANCES = 12;
         OptixInstance instances[NUM_INSTANCES] = {};
 
         // Instance 0: First cube at (0, 2, 0)
@@ -581,6 +581,63 @@ int main(){
         instances[5].visibilityMask = 255;
         instances[5].flags = OPTIX_INSTANCE_FLAG_NONE;
         instances[5].traversableHandle = cube_gas_handle;
+
+        // Instance 6: First blue cube at (-4, 2, 0) - shares SBT record 6
+        float transform6[12];
+        createTransformMatrix(make_float3(-4.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform6);
+        memcpy(instances[6].transform, transform6, sizeof(float) * 12);
+        instances[6].instanceId = 6;
+        instances[6].sbtOffset = 6;
+        instances[6].visibilityMask = 255;
+        instances[6].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[6].traversableHandle = cube_gas_handle;
+
+        // Instance 7: Second blue cube at (-4, 3, 0) - shares SBT record 6
+        float transform7[12];
+        createTransformMatrix(make_float3(-4.0f, 3.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform7);
+        memcpy(instances[7].transform, transform7, sizeof(float) * 12);
+        instances[7].instanceId = 7;
+        instances[7].sbtOffset = 6;
+        instances[7].visibilityMask = 255;
+        instances[7].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[7].traversableHandle = cube_gas_handle;
+
+        // Instance 8: Third blue cube at (-4, 4, 0) - shares SBT record 6
+        float transform8[12];
+        createTransformMatrix(make_float3(-4.0f, 4.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform8);
+        memcpy(instances[8].transform, transform8, sizeof(float) * 12);
+        instances[8].instanceId = 8;
+        instances[8].sbtOffset = 6;
+        instances[8].visibilityMask = 255;
+        instances[8].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[8].traversableHandle = cube_gas_handle;
+
+        float transform9[12];
+        createTransformMatrix(make_float3(5.0f, 2.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform9);
+        memcpy(instances[9].transform, transform9, sizeof(float) * 12);
+        instances[9].instanceId = 9;
+        instances[9].sbtOffset = 7;
+        instances[9].visibilityMask = 255;
+        instances[9].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[9].traversableHandle = cube_gas_handle;
+
+        float transform10[12];
+        createTransformMatrix(make_float3(5.0f, 3.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform10);
+        memcpy(instances[10].transform, transform10, sizeof(float) * 12);
+        instances[10].instanceId = 10;
+        instances[10].sbtOffset = 7;
+        instances[10].visibilityMask = 255;
+        instances[10].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[10].traversableHandle = cube_gas_handle;
+
+        float transform11[12];
+        createTransformMatrix(make_float3(5.0f, 4.0f, 0.0f), make_float3(1.0f, 1.0f, 1.0f), transform11);
+        memcpy(instances[11].transform, transform11, sizeof(float) * 12);
+        instances[11].instanceId = 11;
+        instances[11].sbtOffset = 7;
+        instances[11].visibilityMask = 255;
+        instances[11].flags = OPTIX_INSTANCE_FLAG_NONE;
+        instances[11].traversableHandle = cube_gas_handle;
 
         // Upload instances to device
         CUdeviceptr d_instances;
@@ -650,7 +707,7 @@ int main(){
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
-        const int NUM_HIT_RECORDS = 6;
+        const int NUM_HIT_RECORDS = 8;
         HitGroupRecord hg[NUM_HIT_RECORDS];
 
         // Diffuse materials
@@ -678,6 +735,14 @@ int main(){
         OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg[5]));
         hg[5].data.diffuse_color = make_float3(0.9f, 1.0f, 0.9f); // Slight green tint
         hg[5].data.refraction_index = 1.5f; // Glass IOR
+
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg[6]));
+        hg[6].data.diffuse_color = make_float3(0.2f, 0.2f, 0.8f);  // Blue
+        hg[6].data.refraction_index = 1.0f;
+
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg[7]));
+        hg[7].data.diffuse_color = make_float3(0.2f, 0.2f, 0.8f);  // Blue
+        hg[7].data.refraction_index = 1.5f;
 
         CUdeviceptr d_hg;
         const size_t hit_record_size = sizeof(HitGroupRecord);
