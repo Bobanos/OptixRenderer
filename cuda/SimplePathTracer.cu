@@ -57,6 +57,54 @@ __device__ float3 clamp(const float3& v, float min_val, float max_val) {
     );
 }
 
+// ------------------------------------------------------------------
+// Helper: read per-vertex color from SBT data using barycentrics
+// ------------------------------------------------------------------
+__device__ float3 getVertexColor(const HitGroupData* sbt)
+{
+    const int   prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri      = sbt->indices[prim_idx];
+
+    const float2 bary = optixGetTriangleBarycentrics();
+    const float  b0   = 1.0f - bary.x - bary.y;
+
+    return sbt->vertices[tri.x].color * b0
+         + sbt->vertices[tri.y].color * bary.x
+         + sbt->vertices[tri.z].color * bary.y;
+}
+
+// ------------------------------------------------------------------
+// Helper: compute world-space normal for the hit triangle
+// ------------------------------------------------------------------
+__device__ float3 getTriangleNormal(const HitGroupData* sbt, const float3& ray_dir)
+{
+    const int   prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri      = sbt->indices[prim_idx];
+
+    const float3 v0 = sbt->vertices[tri.x].position;
+    const float3 v1 = sbt->vertices[tri.y].position;
+    const float3 v2 = sbt->vertices[tri.z].position;
+
+    float3 e1 = v1 - v0;
+    float3 e2 = v2 - v0;
+    float3 object_normal = make_float3(
+        e1.y*e2.z - e1.z*e2.y,
+        e1.z*e2.x - e1.x*e2.z,
+        e1.x*e2.y - e1.y*e2.x);
+
+    float3 world_normal = normalize(
+        optixTransformNormalFromObjectToWorldSpace(object_normal));
+
+    // Flip if facing away from ray
+    if (dot(world_normal, ray_dir) > 0.0f)
+        world_normal = world_normal * -1.0f;
+
+    return world_normal;
+}
+
+// ------------------------------------------------------------------
+// Ray generation
+// ------------------------------------------------------------------
 extern "C" __global__ void __raygen__rg()
 {
     const uint3 idx = optixGetLaunchIndex();
@@ -109,6 +157,9 @@ extern "C" __global__ void __raygen__rg()
     );
 }
 
+// ------------------------------------------------------------------
+// Miss: sky gradient
+// ------------------------------------------------------------------
 extern "C" __global__ void __miss__ms()
 {
     // Sky blue gradient
@@ -122,45 +173,32 @@ extern "C" __global__ void __miss__ms()
     optixSetPayload_2(__float_as_uint(color.z));
 }
 
+// ------------------------------------------------------------------
+// Closest hit: solid/diffuse
+// ------------------------------------------------------------------
 extern "C" __global__ void __closesthit__ch()
 {
-    // Get hit point
-    const float t_hit = optixGetRayTmax();
-    const float3 ray_origin = optixGetWorldRayOrigin();
+    const float t_hit          = optixGetRayTmax();
+    const float3 ray_origin    = optixGetWorldRayOrigin();
     const float3 ray_direction = optixGetWorldRayDirection();
-    const float3 hit_point = ray_origin + t_hit * ray_direction;
-    
+    const float3 hit_point     = ray_origin + t_hit * ray_direction;
 
-    // fetch current triangle vertices
-    float3 data[3];
-    optixGetTriangleVertexData( optixGetGASTraversableHandle(), optixGetPrimitiveIndex(), optixGetSbtGASIndex(),
-        optixGetRayTime(), data );
+    const HitGroupData* sbt = (HitGroupData*)optixGetSbtDataPointer();
 
-    // compute triangle normal
-    data[1] = data[1] - data[0];
-    data[2] = data[2] - data[0];
-    float3 object_normal = make_float3(
-        data[1].y*data[2].z - data[1].z*data[2].y,
-        data[1].z*data[2].x - data[1].x*data[2].z,
-        data[1].x*data[2].y - data[1].y*data[2].x );
-    
-    float3 world_normal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
-    
-    // Flip normal if facing away from ray
-    if (dot(world_normal, ray_direction) > 0.0f) {
-        world_normal = world_normal * -1.0f;;
-    }
-    
+    float3 world_normal = getTriangleNormal(sbt, ray_direction);
+    float3 base_color   = getVertexColor(sbt);
+
+    if (length_squared(base_color) < 0.001f)
+        base_color = make_float3(1.0f, 0.0f, 1.0f); // magenta = error
+
     // Accumulate lighting from all lights
     float3 total_diffuse = make_float3(0.0f, 0.0f, 0.0f);
-
     for (int light_idx = 0; light_idx < params.num_lights; light_idx++) {
-        // Calculate lighting for this light
-        float3 to_light = params.light_position[light_idx] - hit_point;
-        float distance_to_light = length(to_light);
-        float3 light_dir = normalize(to_light);
-        
-        // Trace shadow ray
+        float3 to_light          = params.light_position[light_idx] - hit_point;
+        float  distance_to_light = length(to_light);
+        float3 light_dir         = normalize(to_light);
+
+        // Shadow ray
         unsigned int shadow_hit = 0;
         optixTrace(
             params.traversable,
@@ -171,39 +209,18 @@ extern "C" __global__ void __closesthit__ch()
             0.0f,
             OptixVisibilityMask(255),
             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
-            0,
-            1,
-            0,
+            0, 1, 0,
             shadow_hit
         );
-        
-        float shadow = shadow_hit ? 1.0f : 0.0f;
-        
-        // Calculate contribution from this light
-        float ndotl = fmaxf(0.0f, dot(world_normal, light_dir));
-        float attenuation = 1.0f / (1.0f + 0.1f * distance_to_light);
-        
-        total_diffuse = total_diffuse + params.light_color[light_idx] * ndotl * attenuation * shadow;
+
+        float shadow  = shadow_hit ? 1.0f : 0.0f;
+        float ndotl   = fmaxf(0.0f, dot(world_normal, light_dir));
+        float atten   = 1.0f / (1.0f + 0.1f * distance_to_light);
+        total_diffuse = total_diffuse + params.light_color[light_idx] * ndotl * atten * shadow;
     }
-    
-
-
-
-    const HitGroupData* sbt_data = (HitGroupData*)optixGetSbtDataPointer();
-    //const int    prim_idx        = optixGetPrimitiveIndex();
-    //const int    vert_idx_offset = prim_idx*3;
-    float3 base_color = sbt_data->diffuse_color;
-
-    if (length_squared(base_color) < 0.001f) {
-        base_color = make_float3(1.0f, 0.0f, 1.0f);  // Magenta = error indicator
-    }
-
 
     float3 ambient = make_float3(0.1f, 0.1f, 0.1f);
-    float3 color = ambient + base_color * total_diffuse;
-    
-    // Clamp to valid range
-    color = clamp(color, 0.0f, 1.0f);
+    float3 color   = clamp(ambient + base_color * total_diffuse, 0.0f, 1.0f);
 
     optixSetPayload_0(__float_as_uint(color.x));
     optixSetPayload_1(__float_as_uint(color.y));
@@ -211,113 +228,86 @@ extern "C" __global__ void __closesthit__ch()
 }
 
 
+// ------------------------------------------------------------------
+// Closest hit: glass/refractive
+// ------------------------------------------------------------------
 extern "C" __global__ void __closesthit__glass()
 {
-    // Get hit point
-    const float t_hit = optixGetRayTmax();
-    const float3 ray_origin = optixGetWorldRayOrigin();
+    const float t_hit          = optixGetRayTmax();
+    const float3 ray_origin    = optixGetWorldRayOrigin();
     const float3 ray_direction = optixGetWorldRayDirection();
-    const float3 hit_point = ray_origin + t_hit * ray_direction;
-    
-    // Fetch current triangle vertices
-    float3 data[3];
-    optixGetTriangleVertexData(optixGetGASTraversableHandle(), optixGetPrimitiveIndex(), optixGetSbtGASIndex(),
-        optixGetRayTime(), data);
+    const float3 hit_point     = ray_origin + t_hit * ray_direction;
 
-    // Compute triangle normal
-    data[1] = data[1] - data[0];
-    data[2] = data[2] - data[0];
+    const HitGroupData* sbt = (HitGroupData*)optixGetSbtDataPointer();
+
+    // Compute normal (without flipping — we need the raw outward normal for IOR)
+    const int   prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri      = sbt->indices[prim_idx];
+    const float3 v0 = sbt->vertices[tri.x].position;
+    const float3 v1 = sbt->vertices[tri.y].position;
+    const float3 v2 = sbt->vertices[tri.z].position;
+    float3 e1 = v1 - v0;
+    float3 e2 = v2 - v0;
     float3 object_normal = make_float3(
-        data[1].y*data[2].z - data[1].z*data[2].y,
-        data[1].z*data[2].x - data[1].x*data[2].z,
-        data[1].x*data[2].y - data[1].y*data[2].x);
-    
-    float3 world_normal = normalize(optixTransformNormalFromObjectToWorldSpace(object_normal));
-    
-    // Determine if we're entering or exiting the material
+        e1.y*e2.z - e1.z*e2.y,
+        e1.z*e2.x - e1.x*e2.z,
+        e1.x*e2.y - e1.y*e2.x);
+    float3 world_normal = normalize(
+        optixTransformNormalFromObjectToWorldSpace(object_normal));
+
+    // Determine enter/exit
     bool entering = dot(world_normal, ray_direction) < 0.0f;
-    if (!entering) {
+    if (!entering)
         world_normal = world_normal * -1.0f;
-    }
-    
-    const HitGroupData* sbt_data = (HitGroupData*)optixGetSbtDataPointer();
-    float3 base_color = sbt_data->diffuse_color;
-    float ior = sbt_data->refraction_index;
 
-    // Get current recursion depth
+    float3 base_color = getVertexColor(sbt);
+    float  ior        = sbt->refraction_index;
+
     unsigned int current_depth = optixGetPayload_3();
-
     float3 color;
 
-    // If we've reached max depth, just return the tinted color (no more recursion)
-    if (current_depth >= 3) {  // Max 3 bounces for glass
-        color = base_color * 0.8f;  // Slightly darker fallback
+    if (current_depth >= 3) {
+        // Max depth fallback
+        color = base_color * 0.8f;
     }
     else {
-        // Simple refraction/reflection mix
-        float eta = entering ? (1.0f / ior) : ior;
-        float cos_theta = fminf(dot(ray_direction * -1.0f, world_normal), 1.0f);
-        float sin_theta = sqrtf(1.0f - cos_theta * cos_theta);
-    
-        // Schlick's approximation for Fresnel
-        float r0 = (1.0f - ior) / (1.0f + ior);
-        r0 = r0 * r0;
+        float eta         = entering ? (1.0f / ior) : ior;
+        float cos_theta   = fminf(dot(ray_direction * -1.0f, world_normal), 1.0f);
+        float sin_theta   = sqrtf(1.0f - cos_theta * cos_theta);
+        float r0          = (1.0f - ior) / (1.0f + ior);
+        r0                = r0 * r0;
         float reflectance = r0 + (1.0f - r0) * powf((1.0f - cos_theta), 5.0f);
-    
-        // Total internal reflection or reflection
+
         if (eta * sin_theta > 1.0f || reflectance > 0.5f) {
             // Reflection
             float3 reflected = ray_direction - 2.0f * dot(ray_direction, world_normal) * world_normal;
-        
-            // Trace reflection ray
             unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = current_depth + 1;
-            optixTrace(
-                params.traversable,
-                hit_point + world_normal * 0.001f,
-                normalize(reflected),
-                0.001f,
-                1e16f,
-                0.0f,
-                OptixVisibilityMask(255),
-                OPTIX_RAY_FLAG_NONE,
-                0,
-                1,
-                0,
-                p0, p1, p2, p3
-            );
-        
-            color = make_float3(__uint_as_float(p0), __uint_as_float(p1), __uint_as_float(p2));
-            color = color * base_color; // Tint by glass color
+            optixTrace(params.traversable,
+                       hit_point + world_normal * 0.001f, normalize(reflected),
+                       0.001f, 1e16f, 0.0f,
+                       OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE, 0, 1, 0,
+                       p0, p1, p2, p3);
+            color = make_float3(__uint_as_float(p0),
+                                __uint_as_float(p1),
+                                __uint_as_float(p2)) * base_color;
         }
         else {
             // Refraction
-            float3 refracted_perp = eta * (ray_direction + cos_theta * world_normal);
+            float3 refracted_perp     = eta * (ray_direction + cos_theta * world_normal);
             float3 refracted_parallel = -sqrtf(fabsf(1.0f - dot(refracted_perp, refracted_perp))) * world_normal;
-            float3 refracted = refracted_perp + refracted_parallel;
-        
-            // Trace refraction ray
+            float3 refracted          = refracted_perp + refracted_parallel;
             unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = current_depth + 1;
-            optixTrace(
-                params.traversable,
-                hit_point - world_normal * 0.001f, // Move slightly inside
-                normalize(refracted),
-                0.001f,
-                1e16f,
-                0.0f,
-                OptixVisibilityMask(255),
-                OPTIX_RAY_FLAG_NONE,
-                0,
-                1,
-                0,
-                p0, p1, p2, p3
-            );
-        
-            color = make_float3(__uint_as_float(p0), __uint_as_float(p1), __uint_as_float(p2));
-            color = color * base_color; // Tint by glass color
+            optixTrace(params.traversable,
+                       hit_point - world_normal * 0.001f, normalize(refracted),
+                       0.001f, 1e16f, 0.0f,
+                       OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE, 0, 1, 0,
+                       p0, p1, p2, p3);
+            color = make_float3(__uint_as_float(p0),
+                                __uint_as_float(p1),
+                                __uint_as_float(p2)) * base_color;
         }
     }
-    
-    // Clamp to valid range
+
     color = clamp(color, 0.0f, 1.0f);
 
     optixSetPayload_0(__float_as_uint(color.x));

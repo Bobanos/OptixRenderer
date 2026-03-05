@@ -12,6 +12,11 @@ struct Camera {
     float3 vertical;
 };
 
+struct ColoredVertex {
+    float3 position;
+    float3 color;
+};
+
 struct Params {
     uchar4* image;
     int     width;
@@ -27,19 +32,11 @@ struct Params {
     int max_recursion_depth;
 };
 
-struct RayGenData
-{
-};
-
-
-struct MissData
-{
-    
-};
-
-
+struct RayGenData{};
+struct MissData{};
 struct HitGroupData
 {
-    float3  diffuse_color;
+    ColoredVertex* vertices;
+    uint3* indices;
     float   refraction_index;  // For glass material (1.0 = opaque, 1.5 = glass)
 };

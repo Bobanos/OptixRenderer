@@ -59,10 +59,12 @@ add_executable(optix_renderer
     src/camera.cpp
     src/camera.h
     src/optix_params.h
+    src/obj_loader.h
 )
 
 target_include_directories(optix_renderer PRIVATE
     src
+    assets
     ${OPTIX_INCLUDE_DIR}
 )
 
@@ -75,6 +77,22 @@ target_link_libraries(optix_renderer PRIVATE
 
 set_target_properties(optix_renderer PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
+# Copy assets to build directory so the exe can find them
+# when run outside of VS (e.g. from terminal in build folder)
+add_custom_command(TARGET optix_renderer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:optix_renderer>/assets"
+    COMMENT "Copying assets to build directory"
+)
+
+add_custom_command(TARGET optix_renderer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_BINARY_DIR}/generated"
+        "$<TARGET_FILE_DIR:optix_renderer>/generated"
+    COMMENT "Copying generated optixir to build directory"
 )
 
 # ------------------------------------------------------------------------------
