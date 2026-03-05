@@ -15,6 +15,7 @@ struct Camera {
 struct ColoredVertex {
     float3 position;
     float3 color;
+    float2 uv;
 };
 
 struct Params {
@@ -39,4 +40,5 @@ struct HitGroupData
     ColoredVertex* vertices;
     uint3* indices;
     float   refraction_index;  // For glass material (1.0 = opaque, 1.5 = glass)
+    cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
 };

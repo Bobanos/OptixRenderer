@@ -103,6 +103,37 @@ __device__ float3 getTriangleNormal(const HitGroupData* sbt, const float3& ray_d
 }
 
 // ------------------------------------------------------------------
+// Helper: get albedo — samples texture if present, else vertex color
+// ------------------------------------------------------------------
+__device__ float3 getAlbedo(const HitGroupData* sbt)
+{
+    const int   prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri      = sbt->indices[prim_idx];
+    const float2 bary    = optixGetTriangleBarycentrics();
+    const float  b0      = 1.0f - bary.x - bary.y;
+
+    if (sbt->albedo_texture != 0) {
+        // Interpolate UV coordinates using barycentrics
+        const float2 uv0 = sbt->vertices[tri.x].uv;
+        const float2 uv1 = sbt->vertices[tri.y].uv;
+        const float2 uv2 = sbt->vertices[tri.z].uv;
+        float u = uv0.x * b0 + uv1.x * bary.x + uv2.x * bary.y;
+        float v = uv0.y * b0 + uv1.y * bary.x + uv2.y * bary.y;
+
+        v = 1.0f - v; // flip V: OBJ origin is bottom-left, stb_image is top-left
+
+        // tex2D returns float4 in [0,1] because of cudaReadModeNormalizedFloat
+        float4 t = tex2D<float4>(sbt->albedo_texture, u, v);
+        return make_float3(t.x, t.y, t.z);
+    }
+
+    // No texture — interpolate vertex color
+    return sbt->vertices[tri.x].color * b0
+         + sbt->vertices[tri.y].color * bary.x
+         + sbt->vertices[tri.z].color * bary.y;
+}
+
+// ------------------------------------------------------------------
 // Ray generation
 // ------------------------------------------------------------------
 extern "C" __global__ void __raygen__rg()
@@ -186,7 +217,7 @@ extern "C" __global__ void __closesthit__ch()
     const HitGroupData* sbt = (HitGroupData*)optixGetSbtDataPointer();
 
     float3 world_normal = getTriangleNormal(sbt, ray_direction);
-    float3 base_color   = getVertexColor(sbt);
+    float3 base_color   = getAlbedo(sbt);
 
     if (length_squared(base_color) < 0.001f)
         base_color = make_float3(1.0f, 0.0f, 1.0f); // magenta = error
@@ -260,7 +291,7 @@ extern "C" __global__ void __closesthit__glass()
     if (!entering)
         world_normal = world_normal * -1.0f;
 
-    float3 base_color = getVertexColor(sbt);
+    float3 base_color = getAlbedo(sbt);
     float  ior        = sbt->refraction_index;
 
     unsigned int current_depth = optixGetPayload_3();

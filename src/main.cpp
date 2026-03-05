@@ -16,6 +16,7 @@
 #include "optix_params.h"
 #include "camera.h"
 #include "obj_loader.h"
+#include "stb_image.h"
 
 #include <GLFW/glfw3.h>
 
@@ -49,7 +50,7 @@ CameraController* g_camera = nullptr;
 bool g_mouse_captured = false;
 
 // ------------------------------------------------------------------
-// Utility: load file
+// Utility: load 
 // ------------------------------------------------------------------
 
 static std::vector<char> loadFile(const std::string& path){
@@ -64,6 +65,52 @@ static std::vector<char> loadFile(const std::string& path){
     std::vector<char> data(size);
     f.read(data.data(), size);
     return data;
+}
+
+static cudaTextureObject_t loadTextureFromFile(const std::string& path,
+    cudaArray_t& out_array)
+{
+    if (path.empty()) return 0;
+
+    int w, h, ch;
+    // Force 4 channels (RGBA) for consistent upload
+    unsigned char* data = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!data) {
+        std::cerr << "[TEX] Failed to load: " << path
+            << " — " << stbi_failure_reason() << "\n";
+        return 0;
+    }
+
+    std::cout << "[TEX] Loaded " << path << " (" << w << "x" << h << ")\n";
+
+    // Allocate CUDA array (uchar4)
+    cudaChannelFormatDesc fmt = cudaCreateChannelDesc<uchar4>();
+    CUDA_CHECK(cudaMallocArray(&out_array, &fmt, w, h));
+    CUDA_CHECK(cudaMemcpy2DToArray(
+        out_array, 0, 0,
+        data,
+        w * 4 * sizeof(unsigned char),
+        w * 4 * sizeof(unsigned char),
+        h,
+        cudaMemcpyHostToDevice
+    ));
+    stbi_image_free(data);
+
+    cudaResourceDesc res_desc = {};
+    res_desc.resType = cudaResourceTypeArray;
+    res_desc.res.array.array = out_array;
+
+    cudaTextureDesc tex_desc = {};
+    tex_desc.addressMode[0] = cudaAddressModeWrap;
+    tex_desc.addressMode[1] = cudaAddressModeWrap;
+    tex_desc.filterMode = cudaFilterModeLinear;
+    // uchar4 needs normalized read to get [0,1] floats in the shader
+    tex_desc.readMode = cudaReadModeNormalizedFloat;
+    tex_desc.normalizedCoords = 1;
+
+    cudaTextureObject_t tex = 0;
+    CUDA_CHECK(cudaCreateTextureObject(&tex, &res_desc, &tex_desc, nullptr));
+    return tex;
 }
 
 // ------------------------------------------------------------------
@@ -556,23 +603,33 @@ int main(){
         // we assign sbtOffset per-instance during IAS build above.
         // Here we just fill one record per GAS in the same order.
         // ------------------------------------------------------------------
+        struct TexEntry {
+            cudaTextureObject_t tex;
+            cudaArray_t         array; // keep alive until cleanup
+        };
+        std::vector<TexEntry> tex_entries(gas_list.size(), { 0, nullptr });
+
         const int NUM_HIT_RECORDS = (int)gas_list.size();
         std::vector<HitGroupRecord> hg_records(NUM_HIT_RECORDS);
 
         for (int i = 0; i < NUM_HIT_RECORDS; i++) {
             auto& gas = gas_list[i];
             auto& rec = hg_records[i];
+            auto& mesh = ship_meshes[i];
 
-            if (gas.is_glass) {
+            if (gas.is_glass)
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &rec));
-            }
-            else {
+            else
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &rec));
-            }
 
             rec.data.vertices = (ColoredVertex*)gas.d_colored_verts;
             rec.data.indices = (uint3*)gas.d_indices;
             rec.data.refraction_index = gas.ior;
+
+            // Load texture if this material has one
+            rec.data.albedo_texture = loadTextureFromFile(
+                mesh.texture_path, tex_entries[i].array);
+            tex_entries[i].tex = rec.data.albedo_texture;
         }
 
         CUdeviceptr d_hg;
@@ -833,6 +890,10 @@ int main(){
             CUDA_CHECK(cudaFree((void*)gas.d_positions));
             CUDA_CHECK(cudaFree((void*)gas.d_indices));
             CUDA_CHECK(cudaFree((void*)gas.d_output));
+        }
+        for (auto& te : tex_entries) {
+            if (te.tex)   CUDA_CHECK(cudaDestroyTextureObject(te.tex));
+            if (te.array) CUDA_CHECK(cudaFreeArray(te.array));
         }
         CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
     }

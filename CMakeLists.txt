@@ -60,6 +60,7 @@ add_executable(optix_renderer
     src/camera.h
     src/optix_params.h
     src/obj_loader.h
+    src/stb_image_impl.cpp
 )
 
 target_include_directories(optix_renderer PRIVATE
