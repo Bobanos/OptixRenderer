@@ -19,6 +19,15 @@ struct ObjMesh {
     std::string                texture_path; // empty = no texture
 };
 
+// Merged result: all solid geometry in one buffer, all glass in another
+struct MergedObjMesh {
+    std::vector<ColoredVertex> solid_vertices;
+    std::vector<uint3>         solid_indices;
+    std::vector<ColoredVertex> glass_vertices;
+    std::vector<uint3>         glass_indices;
+    float                      glass_ior = 1.5f; // IOR for the glass SBT record
+};
+
 struct MtlMaterial {
     float3      kd = { 0.8f, 0.8f, 0.8f };
     float       ni = 1.0f;
@@ -37,7 +46,6 @@ inline std::unordered_map<std::string, MtlMaterial> loadMtl(const std::string& p
 
     std::string line, current;
     while (std::getline(f, line)) {
-        // Trim leading whitespace
         size_t start = line.find_first_not_of(" \t");
         if (start == std::string::npos || line[start] == '#') continue;
         line = line.substr(start);
@@ -63,11 +71,9 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
     std::ifstream f(obj_path);
     if (!f) throw std::runtime_error("Failed to open OBJ: " + obj_path);
 
-    // Global position and UV lists (OBJ indices are file-global)
     std::vector<float3> raw_positions;
     std::vector<float2> raw_uvs;
 
-    // Per-material triangle soup: each entry is (pos, uv) for one corner
     struct Corner { float3 pos; float2 uv; };
     std::unordered_map<std::string, std::vector<Corner>> mat_corners;
     std::unordered_map<std::string, float3>              mat_color;
@@ -116,14 +122,12 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
             }
         }
         else if (tok == "f") {
-            // Parse face tokens: v, v/vt, v/vt/vn, v//vn
             std::vector<Corner> face_corners;
             std::string vtok;
             while (ss >> vtok) {
                 Corner c;
                 c.uv = make_float2(0.0f, 0.0f);
 
-                // Split by '/'
                 size_t s1 = vtok.find('/');
                 int vi = std::stoi(vtok.substr(0, s1));
                 if (vi < 0) vi = (int)raw_positions.size() + vi + 1;
@@ -142,7 +146,6 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
                 face_corners.push_back(c);
             }
 
-            // Fan triangulation
             for (int i = 1; i + 1 < (int)face_corners.size(); i++) {
                 mat_corners[current_mat].push_back(face_corners[0]);
                 mat_corners[current_mat].push_back(face_corners[i]);
@@ -151,7 +154,6 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
         }
     }
 
-    // Build one ObjMesh per material
     std::string asset_dir = obj_path.substr(0, obj_path.find_last_of("/\\") + 1);
 
     std::vector<ObjMesh> meshes;
@@ -164,7 +166,6 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
         mesh.ior = mat_ior.count(mat) ? mat_ior[mat] : 1.0f;
         mesh.texture_path = mat_texture.count(mat) ? mat_texture[mat] : "";
 
-        // Prepend asset directory to texture filename
         if (!mesh.texture_path.empty())
             mesh.texture_path = asset_dir + mesh.texture_path;
 
@@ -191,4 +192,42 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
             << "\n";
     }
     return meshes;
+}
+
+// ------------------------------------------------------------------
+// Merge all ObjMeshes into two flat buffers: solid and glass.
+// Per-material Kd color is baked into vertex color, so the shader
+// reads the correct color per-triangle with no extra indirection.
+// ------------------------------------------------------------------
+inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
+{
+    MergedObjMesh result;
+
+    for (const auto& mesh : meshes) {
+        if (mesh.is_glass) {
+            // Use the highest IOR found among glass materials
+            result.glass_ior = mesh.ior;
+
+            uint32_t base = (uint32_t)result.glass_vertices.size();
+            for (const auto& v : mesh.vertices)
+                result.glass_vertices.push_back(v);
+            for (const auto& tri : mesh.indices)
+                result.glass_indices.push_back(make_uint3(
+                    tri.x + base, tri.y + base, tri.z + base));
+        }
+        else {
+            uint32_t base = (uint32_t)result.solid_vertices.size();
+            for (const auto& v : mesh.vertices)
+                result.solid_vertices.push_back(v);
+            for (const auto& tri : mesh.indices)
+                result.solid_indices.push_back(make_uint3(
+                    tri.x + base, tri.y + base, tri.z + base));
+        }
+    }
+
+    std::cout << "[MERGE] Solid: " << result.solid_vertices.size() << " verts, "
+              << result.solid_indices.size() << " tris\n";
+    std::cout << "[MERGE] Glass: " << result.glass_vertices.size() << " verts, "
+              << result.glass_indices.size() << " tris\n";
+    return result;
 }

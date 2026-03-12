@@ -423,130 +423,146 @@ int main(){
             "assets/6887_allied_avenger.mtl"
         );
 
-        if (ship_meshes.empty()){
+        if (ship_meshes.empty())
             throw std::runtime_error("No meshes loaded from OBJ");
+
+        MergedObjMesh merged = mergeObjMeshes(ship_meshes);
+
+        // ------------------------------------------------------------------
+        // Upload merged vertex/index buffers for both material types
+        // ------------------------------------------------------------------
+        CUdeviceptr d_solid_verts = 0, d_solid_positions = 0, d_solid_indices = 0;
+        CUdeviceptr d_glass_verts = 0, d_glass_positions = 0, d_glass_indices = 0;
+
+        // Solid
+        {
+            size_t cv = merged.solid_vertices.size() * sizeof(ColoredVertex);
+            CUDA_CHECK(cudaMalloc((void**)&d_solid_verts, cv));
+            CUDA_CHECK(cudaMemcpy((void*)d_solid_verts, merged.solid_vertices.data(), cv, cudaMemcpyHostToDevice));
+
+            std::vector<float3> pos(merged.solid_vertices.size());
+            for (size_t i = 0; i < pos.size(); i++) pos[i] = merged.solid_vertices[i].position;
+            size_t pb = pos.size() * sizeof(float3);
+            CUDA_CHECK(cudaMalloc((void**)&d_solid_positions, pb));
+            CUDA_CHECK(cudaMemcpy((void*)d_solid_positions, pos.data(), pb, cudaMemcpyHostToDevice));
+
+            size_t ib = merged.solid_indices.size() * sizeof(uint3);
+            CUDA_CHECK(cudaMalloc((void**)&d_solid_indices, ib));
+            CUDA_CHECK(cudaMemcpy((void*)d_solid_indices, merged.solid_indices.data(), ib, cudaMemcpyHostToDevice));
+        }
+
+        // Glass (may be empty — skip build input if so)
+        bool has_glass = !merged.glass_vertices.empty();
+        if (has_glass) {
+            size_t cv = merged.glass_vertices.size() * sizeof(ColoredVertex);
+            CUDA_CHECK(cudaMalloc((void**)&d_glass_verts, cv));
+            CUDA_CHECK(cudaMemcpy((void*)d_glass_verts, merged.glass_vertices.data(), cv, cudaMemcpyHostToDevice));
+
+            std::vector<float3> pos(merged.glass_vertices.size());
+            for (size_t i = 0; i < pos.size(); i++) pos[i] = merged.glass_vertices[i].position;
+            size_t pb = pos.size() * sizeof(float3);
+            CUDA_CHECK(cudaMalloc((void**)&d_glass_positions, pb));
+            CUDA_CHECK(cudaMemcpy((void*)d_glass_positions, pos.data(), pb, cudaMemcpyHostToDevice));
+
+            size_t ib = merged.glass_indices.size() * sizeof(uint3);
+            CUDA_CHECK(cudaMalloc((void**)&d_glass_indices, ib));
+            CUDA_CHECK(cudaMemcpy((void*)d_glass_indices, merged.glass_indices.data(), ib, cudaMemcpyHostToDevice));
         }
 
         // ------------------------------------------------------------------
-        // Build one GAS per material group + upload colored vertex buffers
+        // Build single GAS with 1 or 2 build inputs:
+        //   build input 0 (geometrySbtIndex=0) -> solid -> SBT record 0
+        //   build input 1 (geometrySbtIndex=1) -> glass -> SBT record 1
+        //
+        // numSbtRecords per build input = 1, so SBT indices are assigned
+        // sequentially: solid=0, glass=1.
         // ------------------------------------------------------------------
-        struct ShipGas {
-            OptixTraversableHandle handle;
-            CUdeviceptr            d_colored_verts; // ColoredVertex* — for shader
-            CUdeviceptr            d_positions;     // float3*        — for GAS build
-            CUdeviceptr            d_indices;       // uint3*
-            CUdeviceptr            d_output;        // GAS output buffer
-            bool                   is_glass;
-            float                  ior;
-        };
-        std::vector<ShipGas> gas_list;
+        unsigned int solid_geom_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+        unsigned int glass_geom_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
 
-        for (auto& mesh : ship_meshes) {
-            if (mesh.indices.empty()) continue;
+        OptixBuildInput build_inputs[2] = {};
 
-            ShipGas gas;
-            gas.is_glass = mesh.is_glass;
-            gas.ior = mesh.ior;
+        // Build input 0: solid (geometrySbtIndex = 0)
+        build_inputs[0].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+        build_inputs[0].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+        build_inputs[0].triangleArray.vertexStrideInBytes = sizeof(float3);
+        build_inputs[0].triangleArray.numVertices = (unsigned int)merged.solid_vertices.size();
+        build_inputs[0].triangleArray.vertexBuffers = &d_solid_positions;
+        build_inputs[0].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+        build_inputs[0].triangleArray.indexStrideInBytes = sizeof(uint3);
+        build_inputs[0].triangleArray.numIndexTriplets = (unsigned int)merged.solid_indices.size();
+        build_inputs[0].triangleArray.indexBuffer = d_solid_indices;
+        build_inputs[0].triangleArray.flags = solid_geom_flags;
+        build_inputs[0].triangleArray.numSbtRecords = 1; // -> SBT record 0
 
-            // Upload full ColoredVertex buffer (shader reads this)
-            size_t cv_bytes = mesh.vertices.size() * sizeof(ColoredVertex);
-            CUDA_CHECK(cudaMalloc((void**)&gas.d_colored_verts, cv_bytes));
-            CUDA_CHECK(cudaMemcpy((void*)gas.d_colored_verts,
-                mesh.vertices.data(), cv_bytes,
-                cudaMemcpyHostToDevice));
+        unsigned int num_build_inputs = has_glass ? 2u : 1u;
 
-            // Extract positions-only for the GAS build (OptiX only needs float3)
-            std::vector<float3> positions(mesh.vertices.size());
-            for (size_t i = 0; i < mesh.vertices.size(); i++)
-                positions[i] = mesh.vertices[i].position;
-
-            size_t pos_bytes = positions.size() * sizeof(float3);
-            CUDA_CHECK(cudaMalloc((void**)&gas.d_positions, pos_bytes));
-            CUDA_CHECK(cudaMemcpy((void*)gas.d_positions,
-                positions.data(), pos_bytes,
-                cudaMemcpyHostToDevice));
-
-            // Upload index buffer
-            size_t idx_bytes = mesh.indices.size() * sizeof(uint3);
-            CUDA_CHECK(cudaMalloc((void**)&gas.d_indices, idx_bytes));
-            CUDA_CHECK(cudaMemcpy((void*)gas.d_indices,
-                mesh.indices.data(), idx_bytes,
-                cudaMemcpyHostToDevice));
-
-            // Build GAS using positions-only
-            OptixBuildInput build_input = {};
-            build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
-            build_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
-            build_input.triangleArray.vertexStrideInBytes = sizeof(float3);
-            build_input.triangleArray.numVertices = (unsigned int)positions.size();
-            build_input.triangleArray.vertexBuffers = &gas.d_positions;
-            build_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
-            build_input.triangleArray.indexStrideInBytes = sizeof(uint3);
-            build_input.triangleArray.numIndexTriplets = (unsigned int)mesh.indices.size();
-            build_input.triangleArray.indexBuffer = gas.d_indices;
-            unsigned int geom_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
-            build_input.triangleArray.flags = geom_flags;
-            build_input.triangleArray.numSbtRecords = 1;
-
-            OptixAccelBuildOptions accel_opts = {};
-            accel_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
-            accel_opts.operation = OPTIX_BUILD_OPERATION_BUILD;
-
-            OptixAccelBufferSizes sizes;
-            OPTIX_CHECK(optixAccelComputeMemoryUsage(context, &accel_opts,
-                &build_input, 1, &sizes));
-
-            CUdeviceptr d_temp;
-            CUDA_CHECK(cudaMalloc((void**)&d_temp, sizes.tempSizeInBytes));
-            CUDA_CHECK(cudaMalloc((void**)&gas.d_output, sizes.outputSizeInBytes));
-
-            OPTIX_CHECK(optixAccelBuild(context, 0, &accel_opts,
-                &build_input, 1,
-                d_temp, sizes.tempSizeInBytes,
-                gas.d_output, sizes.outputSizeInBytes,
-                &gas.handle, nullptr, 0));
-            CUDA_CHECK(cudaFree((void*)d_temp));
-
-            gas_list.push_back(gas);
+        if (has_glass) {
+            // Build input 1: glass (geometrySbtIndex = 1)
+            build_inputs[1].type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+            build_inputs[1].triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+            build_inputs[1].triangleArray.vertexStrideInBytes = sizeof(float3);
+            build_inputs[1].triangleArray.numVertices = (unsigned int)merged.glass_vertices.size();
+            build_inputs[1].triangleArray.vertexBuffers = &d_glass_positions;
+            build_inputs[1].triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+            build_inputs[1].triangleArray.indexStrideInBytes = sizeof(uint3);
+            build_inputs[1].triangleArray.numIndexTriplets = (unsigned int)merged.glass_indices.size();
+            build_inputs[1].triangleArray.indexBuffer = d_glass_indices;
+            build_inputs[1].triangleArray.flags = glass_geom_flags;
+            build_inputs[1].triangleArray.numSbtRecords = 1; // -> SBT record 1
         }
 
-        std::cout << "Built " << gas_list.size() << " GAS\n";
+        OptixAccelBuildOptions accel_opts = {};
+        accel_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
+        accel_opts.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+        OptixAccelBufferSizes gas_sizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(context, &accel_opts,
+            build_inputs, num_build_inputs, &gas_sizes));
+
+        CUdeviceptr d_gas_temp, d_gas_output;
+        CUDA_CHECK(cudaMalloc((void**)&d_gas_temp, gas_sizes.tempSizeInBytes));
+        CUDA_CHECK(cudaMalloc((void**)&d_gas_output, gas_sizes.outputSizeInBytes));
+
+        OptixTraversableHandle gas_handle;
+        OPTIX_CHECK(optixAccelBuild(context, 0, &accel_opts,
+            build_inputs, num_build_inputs,
+            d_gas_temp, gas_sizes.tempSizeInBytes,
+            d_gas_output, gas_sizes.outputSizeInBytes,
+            &gas_handle, nullptr, 0));
+        CUDA_CHECK(cudaFree((void*)d_gas_temp));
+
+        std::cout << "Built 1 GAS (" << num_build_inputs << " build inputs)\n";
+
 
         // ----------------------------------------------------------
-        // Build IAS (Instance Acceleration Structure) - one instance per GAS
-        // sbtOffset: 0 = solid, 1 = glass (matches SBT records below)
+        // Build IAS — one instance pointing at the single GAS
+        // sbtOffset = 0: the instance's SBT base
+        // The GAS has numSbtRecords = 1+1 = 2, so OptiX uses:
+        //   solid hit -> sbtOffset(0) + geometrySbtIndex(0) = record 0
+        //   glass hit -> sbtOffset(0) + geometrySbtIndex(1) = record 1
         // ----------------------------------------------------------
-        std::vector<OptixInstance> instances(gas_list.size());
-        for (size_t i = 0; i < gas_list.size(); i++) {
-            OptixInstance& inst = instances[i];
-            memset(&inst, 0, sizeof(OptixInstance));
-
-            // No rotation at startup — pass 0 for all axes
-            createTransformMatrix(
-                make_float3(0.0f, 1.0f, 0.0f),    // translation
-                make_float3(0.05f, 0.05f, 0.05f), // scale
-                inst.transform,
-                0.0f, 0.0f, 0.0f                  // rotation x, y, z
-            );
-
-            inst.instanceId = (unsigned int)i;
-            inst.sbtOffset = (unsigned int)i;
-            inst.visibilityMask = 255;
-            inst.flags = OPTIX_INSTANCE_FLAG_NONE;
-            inst.traversableHandle = gas_list[i].handle;
-        }
+        OptixInstance instance = {};
+        createTransformMatrix(
+            make_float3(0.0f, 1.0f, 0.0f),
+            make_float3(0.05f, 0.05f, 0.05f),
+            instance.transform,
+            0.0f, 0.0f, 0.0f
+        );
+        instance.instanceId = 0;
+        instance.sbtOffset = 0; // base for SBT record lookup
+        instance.visibilityMask = 255;
+        instance.flags = OPTIX_INSTANCE_FLAG_NONE;
+        instance.traversableHandle = gas_handle;
 
         CUdeviceptr d_instances;
-        CUDA_CHECK(cudaMalloc((void**)&d_instances,
-            instances.size() * sizeof(OptixInstance)));
-        CUDA_CHECK(cudaMemcpy((void*)d_instances, instances.data(),
-            instances.size() * sizeof(OptixInstance),
-            cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc((void**)&d_instances, sizeof(OptixInstance)));
+        CUDA_CHECK(cudaMemcpy((void*)d_instances, &instance, sizeof(OptixInstance), cudaMemcpyHostToDevice));
 
         OptixBuildInput inst_input = {};
         inst_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
         inst_input.instanceArray.instances = d_instances;
-        inst_input.instanceArray.numInstances = (unsigned int)instances.size();
+        inst_input.instanceArray.numInstances = 1;
 
         OptixAccelBuildOptions ias_opts = {};
         ias_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
@@ -567,77 +583,40 @@ int main(){
             &ias_handle, nullptr, 0));
         CUDA_CHECK(cudaFree((void*)d_ias_temp));
 
+        // ----------------------------------------------------------
+        // SBT — exactly 2 hit records
+        //   record 0 -> solid/__closesthit__ch  (vertices=solid buffer)
+        //   record 1 -> glass/__closesthit__glass (vertices=glass buffer)
+        // ----------------------------------------------------------
+        HitGroupRecord hg_records[2] = {};
 
-        // ----------------------------------------------------------
-        // SBT
-        // ----------------------------------------------------------
-        CUdeviceptr d_rg;
-        const size_t raygen_record_size = sizeof(RayGenRecord);
-        CUDA_CHECK(cudaMalloc((void**)&d_rg, raygen_record_size));
+        // Record 0: solid plastic
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_records[0]));
+        hg_records[0].data.vertices = (ColoredVertex*)d_solid_verts;
+        hg_records[0].data.indices = (uint3*)d_solid_indices;
+        hg_records[0].data.refraction_index = 1.0f;
+        hg_records[0].data.albedo_texture = 0; // vertex color carries per-material Kd
+
+        // Record 1: glass
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg_records[1]));
+        hg_records[1].data.vertices = (ColoredVertex*)d_glass_verts;
+        hg_records[1].data.indices = (uint3*)d_glass_indices;
+        hg_records[1].data.refraction_index = merged.glass_ior;
+        hg_records[1].data.albedo_texture = 0;
+
+        CUdeviceptr d_rg, d_ms, d_hg;
         RayGenRecord rg = {};
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
+        CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(RayGenRecord)));
         CUDA_CHECK(cudaMemcpy((void*)d_rg, &rg, sizeof(rg), cudaMemcpyHostToDevice));
 
-        CUdeviceptr d_ms;
-        const size_t miss_record_size = sizeof(MissRecord);
-        CUDA_CHECK(cudaMalloc((void**)&d_ms, miss_record_size));
-        MissRecord   ms = {};
+        MissRecord ms = {};
         OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &ms));
+        CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(MissRecord)));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
-        // ------------------------------------------------------------------
-        // SBT — hit records: one per GAS (one per material group)
-        // Each record stores:
-        //   - the hit program header (solid or glass)
-        //   - a pointer to that GAS's colored vertex buffer
-        //   - a pointer to that GAS's index buffer
-        //   - the IOR
-        //
-        // sbtOffset on the instance selects which record is used.
-        // solid GAS -> lowest-indexed solid record
-        // glass GAS -> next record(s)
-        //
-        // The cleanest layout: solid records first, glass records after.
-        // sbtOffset 0..N_solid-1 = solid, N_solid..N-1 = glass
-        // But since sbtOffset must match position in the array exactly,
-        // we assign sbtOffset per-instance during IAS build above.
-        // Here we just fill one record per GAS in the same order.
-        // ------------------------------------------------------------------
-        struct TexEntry {
-            cudaTextureObject_t tex;
-            cudaArray_t         array; // keep alive until cleanup
-        };
-        std::vector<TexEntry> tex_entries(gas_list.size(), { 0, nullptr });
-
-        const int NUM_HIT_RECORDS = (int)gas_list.size();
-        std::vector<HitGroupRecord> hg_records(NUM_HIT_RECORDS);
-
-        for (int i = 0; i < NUM_HIT_RECORDS; i++) {
-            auto& gas = gas_list[i];
-            auto& rec = hg_records[i];
-            auto& mesh = ship_meshes[i];
-
-            if (gas.is_glass)
-                OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &rec));
-            else
-                OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &rec));
-
-            rec.data.vertices = (ColoredVertex*)gas.d_colored_verts;
-            rec.data.indices = (uint3*)gas.d_indices;
-            rec.data.refraction_index = gas.ior;
-
-            // Load texture if this material has one
-            rec.data.albedo_texture = loadTextureFromFile(
-                mesh.texture_path, tex_entries[i].array);
-            tex_entries[i].tex = rec.data.albedo_texture;
-        }
-
-        CUdeviceptr d_hg;
-        CUDA_CHECK(cudaMalloc((void**)&d_hg,
-            sizeof(HitGroupRecord) * NUM_HIT_RECORDS));
-        CUDA_CHECK(cudaMemcpy((void*)d_hg, hg_records.data(),
-            sizeof(HitGroupRecord) * NUM_HIT_RECORDS,
-            cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(HitGroupRecord) * 2));
+        CUDA_CHECK(cudaMemcpy((void*)d_hg, hg_records, sizeof(HitGroupRecord) * 2, cudaMemcpyHostToDevice));
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;
@@ -646,7 +625,7 @@ int main(){
         sbt.missRecordCount = 1;
         sbt.hitgroupRecordBase = d_hg;
         sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
-        sbt.hitgroupRecordCount = NUM_HIT_RECORDS;
+        sbt.hitgroupRecordCount = 2;
 
 
         // ----------------------------------------------------------
@@ -731,25 +710,16 @@ int main(){
                 ship_rotation_y += rotation_speed * DEG2RAD * deltaTime;
 
             float sc = 0.05f;
-            for (size_t i = 0; i < gas_list.size(); i++) {
-                createTransformMatrix(
-                    make_float3(0.0f, 1.0f, 0.0f),
-                    make_float3(sc, sc, sc),
-                    instances[i].transform,
-                    ship_rotation_x,
-                    ship_rotation_y,
-                    ship_rotation_z
-                );
-            }
-
-            CUDA_CHECK(cudaMemcpy((void*)d_instances, instances.data(),
-                instances.size() * sizeof(OptixInstance),
-                cudaMemcpyHostToDevice));
-
-            OPTIX_CHECK(optixAccelBuild(context, 0, &ias_opts_rt, &inst_input, 1,
-                d_ias_temp_rt, ias_sizes.tempSizeInBytes,
-                d_ias_output, ias_sizes.outputSizeInBytes,
-                &ias_handle, nullptr, 0));
+            createTransformMatrix(
+                make_float3(0.0f, 1.0f, 0.0f),
+                make_float3(sc, sc, sc),
+                instance.transform,
+                ship_rotation_x,
+                ship_rotation_y,
+                ship_rotation_z
+            );
+            CUDA_CHECK(cudaMemcpy((void*)d_instances, &instance,
+                sizeof(OptixInstance), cudaMemcpyHostToDevice));
 
             params.traversable = ias_handle;
 
@@ -885,16 +855,16 @@ int main(){
         CUDA_CHECK(cudaFree((void*)d_rg));
         CUDA_CHECK(cudaFree((void*)d_ms));
         CUDA_CHECK(cudaFree((void*)d_hg));
-        for (auto& gas : gas_list) {
-            CUDA_CHECK(cudaFree((void*)gas.d_colored_verts));
-            CUDA_CHECK(cudaFree((void*)gas.d_positions));
-            CUDA_CHECK(cudaFree((void*)gas.d_indices));
-            CUDA_CHECK(cudaFree((void*)gas.d_output));
+        CUDA_CHECK(cudaFree((void*)d_solid_verts));
+        CUDA_CHECK(cudaFree((void*)d_solid_positions));
+        CUDA_CHECK(cudaFree((void*)d_solid_indices));
+        if (has_glass) {
+            CUDA_CHECK(cudaFree((void*)d_glass_verts));
+            CUDA_CHECK(cudaFree((void*)d_glass_positions));
+            CUDA_CHECK(cudaFree((void*)d_glass_indices));
         }
-        for (auto& te : tex_entries) {
-            if (te.tex)   CUDA_CHECK(cudaDestroyTextureObject(te.tex));
-            if (te.array) CUDA_CHECK(cudaFreeArray(te.array));
-        }
+        CUDA_CHECK(cudaFree((void*)d_gas_output));
+        CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
         CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
     }
     catch (const std::exception& e){
