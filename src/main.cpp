@@ -518,7 +518,7 @@ int main() {
             make_float3(0.0f, 1.0f, 0.0f),
             make_float3(0.05f, 0.05f, 0.05f),
             instance.transform,
-            0.0f, 0.0f, 0.0f
+            - PI/2, 0.0f, 0.0f
         );
         instance.instanceId = 0;
         instance.sbtOffset = 0;
@@ -626,12 +626,24 @@ int main() {
         params.width = width;
         params.height = height;
         params.traversable = ias_handle;
-        params.light_position[0] = make_float3(2.0f, 3.0f, 2.0f);
-        params.light_color[0] = make_float3(1.0f, 0.4f, 0.4f);
 
-        params.light_position[1] = make_float3(2.0f, 3.0f, -2.0f);
-        params.light_color[1] = make_float3(0.4f, 0.4f, 1.0f);
-        params.num_lights = 2;
+        // Initialize lights
+        params.num_lights = 3;
+
+        // Light 0: Point light (red)
+        params.lights[0].type = 0;
+        params.lights[0].position_or_direction = make_float3(2.0f, 3.0f, 2.0f);
+        params.lights[0].color = make_float3(1.0f, 0.4f, 0.4f);
+
+        // Light 1: Point light (blue)
+        params.lights[1].type = 0;
+        params.lights[1].position_or_direction = make_float3(2.0f, 3.0f, -2.0f);
+        params.lights[1].color = make_float3(0.4f, 0.4f, 1.0f);
+
+        // Light 2: Directional light (from above)
+        params.lights[2].type = 1;
+        params.lights[2].position_or_direction = normalize(make_float3(0.0f, -1.0f, -0.2f));
+        params.lights[2].color = make_float3(0.5f, 0.5f, 0.5f);
 
         CUdeviceptr d_params;
         CUDA_CHECK(cudaMalloc((void**)&d_params, sizeof(Params)));
@@ -758,30 +770,44 @@ int main() {
             // Light control
             ImGui::Begin("Light Controls");
 
-            static float light1_pos[3] = { 5.0f, 5.0f, 5.0f };
-            static float light1_col[3] = { 1.0f, 0.4f, 0.4f };
-            static float light2_pos[3] = { -5.0f, -5.0f, -5.0f };
-            static float light2_col[3] = { 0.4f, 0.4f, 1.0f };
+            static float light0_pos[3] = { 2.0f, 3.0f, 2.0f };
+            static float light0_col[3] = { 1.0f, 0.4f, 0.4f };
+            static float light1_pos[3] = { 2.0f, 3.0f, -2.0f };
+            static float light1_col[3] = { 0.4f, 0.4f, 1.0f };
+            static float light2_dir[3] = { 0.0f, -1.0f, -0.2f };
+            static float light2_col[3] = { 0.5f, 0.5f, 0.5f };
 
-            // Disable interaction when camera is captured
             if (g_mouse_captured) {
                 ImGui::BeginDisabled();
             }
 
-            ImGui::Text("Light 1");
-            if (ImGui::DragFloat3("Light Position 1", light1_pos, 0.1f, -20.0f, 20.0f), ImGuiSliderFlags_NoInput) {
-                params.light_position[0] = make_float3(light1_pos[0], light1_pos[1], light1_pos[2]);
+            // Point Light 1
+            ImGui::Text("Point Light 1 (Red)");
+            if (ImGui::DragFloat3("Light 1 Position", light0_pos, 0.1f, -20.0f, 20.0f)) {
+                params.lights[0].position_or_direction = make_float3(light0_pos[0], light0_pos[1], light0_pos[2]);
             }
-            if (ImGui::ColorEdit3("Light Color 1", light1_col), ImGuiSliderFlags_NoInput) {
-                params.light_color[0] = make_float3(light1_col[0], light1_col[1], light1_col[2]);
+            if (ImGui::ColorEdit3("Light 1 Color", light0_col)) {
+                params.lights[0].color = make_float3(light0_col[0], light0_col[1], light0_col[2]);
             }
             ImGui::Separator();
-            ImGui::Text("Light 2");
-            if (ImGui::DragFloat3("Light Position 2", light2_pos, 0.1f, -20.0f, 20.0f), ImGuiSliderFlags_NoInput) {
-                params.light_position[1] = make_float3(light2_pos[0], light2_pos[1], light2_pos[2]);
+
+            // Point Light 2
+            ImGui::Text("Point Light 2 (Blue)");
+            if (ImGui::DragFloat3("Light 2 Position", light1_pos, 0.1f, -20.0f, 20.0f)) {
+                params.lights[1].position_or_direction = make_float3(light1_pos[0], light1_pos[1], light1_pos[2]);
             }
-            if (ImGui::ColorEdit3("Light Color 2", light2_col), ImGuiSliderFlags_NoInput) {
-                params.light_color[1] = make_float3(light2_col[0], light2_col[1], light2_col[2]);
+            if (ImGui::ColorEdit3("Light 2 Color", light1_col)) {
+                params.lights[1].color = make_float3(light1_col[0], light1_col[1], light1_col[2]);
+            }
+            ImGui::Separator();
+
+            // Directional Light
+            ImGui::Text("Directional Light");
+            if (ImGui::DragFloat3("Light 3 Direction", light2_dir, 0.05f, 100.0f, 1.0f)) {
+                params.lights[2].position_or_direction = normalize(make_float3(light2_dir[0], light2_dir[1], light2_dir[2]));
+            }
+            if (ImGui::ColorEdit3("Light 3 Color", light2_col)) {
+                params.lights[2].color = make_float3(light2_col[0], light2_col[1], light2_col[2]);
             }
 
             if (g_mouse_captured) {

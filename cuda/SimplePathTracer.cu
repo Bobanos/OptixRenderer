@@ -224,12 +224,26 @@ extern "C" __global__ void __closesthit__ch()
 
     // Accumulate lighting from all lights
     float3 total_diffuse = make_float3(0.0f, 0.0f, 0.0f);
-    for (int light_idx = 0; light_idx < params.num_lights; light_idx++) {
-        float3 to_light          = params.light_position[light_idx] - hit_point;
-        float  distance_to_light = length(to_light);
-        float3 light_dir         = normalize(to_light);
 
-        // Shadow ray
+    for (int light_idx = 0; light_idx < params.num_lights; light_idx++) {
+        const Light& light = params.lights[light_idx];
+        float3 light_dir;
+        float distance_to_light;
+        float atten = 1.0f;
+
+        if (light.type == 0) {
+            // Point light
+            float3 to_light = light.position_or_direction - hit_point;
+            distance_to_light = length(to_light);
+            light_dir = normalize(to_light);
+            atten = 1.0f / (1.0f + 0.1f * distance_to_light);
+        } else {
+            // Directional light
+            light_dir = normalize(light.position_or_direction);
+            distance_to_light = 1e16f;
+            atten = 1.0f;
+        }
+
         unsigned int shadow_hit = 0;
         optixTrace(
             params.traversable,
@@ -246,8 +260,7 @@ extern "C" __global__ void __closesthit__ch()
 
         float shadow  = shadow_hit ? 1.0f : 0.0f;
         float ndotl   = fmaxf(0.0f, dot(world_normal, light_dir));
-        float atten   = 1.0f / (1.0f + 0.1f * distance_to_light);
-        total_diffuse = total_diffuse + params.light_color[light_idx] * ndotl * atten * shadow;
+        total_diffuse = total_diffuse + light.color * ndotl * atten * shadow;
     }
 
     float3 ambient = make_float3(0.1f, 0.1f, 0.1f);

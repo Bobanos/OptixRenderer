@@ -18,6 +18,14 @@ struct ColoredVertex {
     float2 uv;
 };
 
+// Light types: 0 = point light, 1 = directional light
+struct Light {
+    float3 position_or_direction;  // position for point light, direction for directional light
+    float3 color;
+    int    type;                   // 0 = point, 1 = directional
+    int    _padding;               // for 16-byte alignment
+};
+
 struct Params {
     uchar4* image;
     int     width;
@@ -25,9 +33,8 @@ struct Params {
     Camera  camera;
     OptixTraversableHandle traversable;
 
-    // Multiple lights
-    float3  light_position[2];
-    float3  light_color[2];
+    // Flexible light system
+    Light   lights[4];
     int     num_lights;
 
     int max_recursion_depth;
@@ -46,32 +53,14 @@ struct HitGroupDataCommon
 
 struct HitGroupDataLambert : public HitGroupDataCommon
 {
-    //HitGroupDataCommon common;
-
     float3 albedo;
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
-    //HitGroupDataCommon common;
-
     float refraction_index;
 };
-
-
-//struct HitGroupData
-//{
-//    ColoredVertex* vertices;
-//    uint3* indices;
-//
-//    // lambert section
-//    float3 albedo;
-//    cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
-//
-//    // glass section
-//    float refraction_index;
-//};
 
 // Compile-time verification template for derived hit group types
 template <typename DerivedType>
