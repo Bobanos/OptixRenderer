@@ -19,13 +19,20 @@ struct ObjMesh {
     std::string                texture_path; // empty = no texture
 };
 
-// Merged result: all solid geometry in one buffer, all glass in another
+// Merged result: all geometry in one buffer with per-material SBT indexing
 struct MergedObjMesh {
-    std::vector<ColoredVertex> solid_vertices;
-    std::vector<uint3>         solid_indices;
-    std::vector<ColoredVertex> glass_vertices;
-    std::vector<uint3>         glass_indices;
-    float                      glass_ior = 1.5f; // IOR for the glass SBT record
+    std::vector<ColoredVertex> vertices;
+    std::vector<uint3>         indices;
+    std::vector<uint32_t>      sbt_index_buffer;  // sbt_index_buffer[prim_idx] = SBT record index
+
+    struct MaterialInfo {
+        std::string name;
+        float3      color;
+        float       ior;
+        bool        is_glass;
+        std::string texture_path;
+    };
+    std::vector<MaterialInfo> materials;  // materials[i] = info for SBT record i
 };
 
 struct MtlMaterial {
@@ -195,39 +202,55 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
 }
 
 // ------------------------------------------------------------------
-// Merge all ObjMeshes into two flat buffers: solid and glass.
-// Per-material Kd color is baked into vertex color, so the shader
-// reads the correct color per-triangle with no extra indirection.
+// Merge all ObjMeshes into one flat buffer with per-material SBT indexing.
+// SBT records are assigned in the order materials appear in the ObjMesh vector.
 // ------------------------------------------------------------------
 inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
 {
     MergedObjMesh result;
 
-    for (const auto& mesh : meshes) {
-        if (mesh.is_glass) {
-            // Use the highest IOR found among glass materials
-            result.glass_ior = mesh.ior;
+    for (uint32_t mat_idx = 0; mat_idx < meshes.size(); ++mat_idx) {
+        const auto& mesh = meshes[mat_idx];
 
-            uint32_t base = (uint32_t)result.glass_vertices.size();
-            for (const auto& v : mesh.vertices)
-                result.glass_vertices.push_back(v);
-            for (const auto& tri : mesh.indices)
-                result.glass_indices.push_back(make_uint3(
-                    tri.x + base, tri.y + base, tri.z + base));
+        // Record material info for SBT
+        MergedObjMesh::MaterialInfo mat_info;
+        mat_info.name = mesh.material_name;
+        mat_info.color = mesh.vertices.empty() ? make_float3(0.8f, 0.8f, 0.8f)
+            : mesh.vertices[0].color;
+        mat_info.ior = mesh.ior;
+        mat_info.is_glass = mesh.is_glass;
+        mat_info.texture_path = mesh.texture_path;
+        result.materials.push_back(mat_info);
+
+        // Merge vertices and indices, assigning SBT record index
+        uint32_t vertex_base = (uint32_t)result.vertices.size();
+        for (const auto& v : mesh.vertices) {
+            result.vertices.push_back(v);
         }
-        else {
-            uint32_t base = (uint32_t)result.solid_vertices.size();
-            for (const auto& v : mesh.vertices)
-                result.solid_vertices.push_back(v);
-            for (const auto& tri : mesh.indices)
-                result.solid_indices.push_back(make_uint3(
-                    tri.x + base, tri.y + base, tri.z + base));
+
+        for (const auto& tri : mesh.indices) {
+            result.indices.push_back(make_uint3(
+                tri.x + vertex_base, tri.y + vertex_base, tri.z + vertex_base));
+
+            //// DIAGNOSTIC: Route textured materials (mat_idx 3, 4) to glass SBT record (1)
+            //uint32_t sbt_idx = mat_idx;
+            //if (!mesh.texture_path.empty()) {
+            //    sbt_idx = 1;  // Point to glass shader (SBT index 1)
+            //}
+            //result.sbt_index_buffer.push_back(sbt_idx);
+            result.sbt_index_buffer.push_back(mat_idx);
         }
     }
 
-    std::cout << "[MERGE] Solid: " << result.solid_vertices.size() << " verts, "
-              << result.solid_indices.size() << " tris\n";
-    std::cout << "[MERGE] Glass: " << result.glass_vertices.size() << " verts, "
-              << result.glass_indices.size() << " tris\n";
+    std::cout << "[MERGE] Total: " << result.vertices.size() << " verts, "
+        << result.indices.size() << " tris, "
+        << result.materials.size() << " materials\n";
+    for (size_t i = 0; i < result.materials.size(); ++i) {
+        const auto& m = result.materials[i];
+        std::cout << "  [SBT " << i << "] '" << m.name << "': "
+            << (m.is_glass ? "GLASS" : "solid")
+            << (m.texture_path.empty() ? "" : " tex=" + m.texture_path)
+            << "\n";
+    }
     return result;
 }
