@@ -33,12 +33,63 @@ struct Params {
     int max_recursion_depth;
 };
 
-struct RayGenData{};
-struct MissData{};
-struct HitGroupData
+struct RayGenData {};
+struct MissData {};
+
+
+
+struct HitGroupDataCommon
 {
     ColoredVertex* vertices;
     uint3* indices;
-    float   refraction_index;  // For glass material (1.0 = opaque, 1.5 = glass)
+};
+
+struct HitGroupDataLambert : public HitGroupDataCommon
+{
+    //HitGroupDataCommon common;
+
+    float3 albedo;
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
 };
+
+struct HitGroupDataGlass : public HitGroupDataCommon
+{
+    //HitGroupDataCommon common;
+
+    float refraction_index;
+};
+
+
+//struct HitGroupData
+//{
+//    ColoredVertex* vertices;
+//    uint3* indices;
+//
+//    // lambert section
+//    float3 albedo;
+//    cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
+//
+//    // glass section
+//    float refraction_index;
+//};
+
+// Compile-time verification template for derived hit group types
+template <typename DerivedType>
+struct VerifyHitGroupLayout {
+    static_assert(std::is_base_of_v<HitGroupDataCommon, DerivedType>,
+        "DerivedType must inherit from HitGroupDataCommon");
+
+    static_assert(offsetof(DerivedType, vertices) == offsetof(HitGroupDataCommon, vertices),
+        "vertices offset mismatch in derived type");
+
+    static_assert(offsetof(DerivedType, indices) == offsetof(HitGroupDataCommon, indices),
+        "indices offset mismatch in derived type");
+
+    // Verify derived members come after base members
+    static_assert(sizeof(HitGroupDataCommon) <= sizeof(DerivedType),
+        "DerivedType must be at least as large as HitGroupDataCommon");
+};
+
+// Instantiate verification for each hit group type
+template struct VerifyHitGroupLayout<HitGroupDataLambert>;
+template struct VerifyHitGroupLayout<HitGroupDataGlass>;

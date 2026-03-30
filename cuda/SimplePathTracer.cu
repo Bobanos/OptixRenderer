@@ -60,7 +60,7 @@ __device__ float3 clamp(const float3& v, float min_val, float max_val) {
 // ------------------------------------------------------------------
 // Helper: read per-vertex color from SBT data using barycentrics
 // ------------------------------------------------------------------
-__device__ float3 getVertexColor(const HitGroupData* sbt)
+__device__ float3 getVertexColor(const HitGroupDataCommon * sbt)
 {
     const int   prim_idx = optixGetPrimitiveIndex();
     const uint3 tri      = sbt->indices[prim_idx];
@@ -76,7 +76,7 @@ __device__ float3 getVertexColor(const HitGroupData* sbt)
 // ------------------------------------------------------------------
 // Helper: compute world-space normal for the hit triangle
 // ------------------------------------------------------------------
-__device__ float3 getTriangleNormal(const HitGroupData* sbt, const float3& ray_dir)
+__device__ float3 getTriangleNormal(const HitGroupDataCommon* sbt, const float3& ray_dir)
 {
     const int   prim_idx = optixGetPrimitiveIndex();
     const uint3 tri      = sbt->indices[prim_idx];
@@ -103,9 +103,9 @@ __device__ float3 getTriangleNormal(const HitGroupData* sbt, const float3& ray_d
 }
 
 // ------------------------------------------------------------------
-// Helper: get albedo — samples texture if present, else vertex color
+// Helper: get albedo - samples texture if present, else vertex color
 // ------------------------------------------------------------------
-__device__ float3 getAlbedo(const HitGroupData* sbt)
+__device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
 {
     const int   prim_idx = optixGetPrimitiveIndex();
     const uint3 tri      = sbt->indices[prim_idx];
@@ -127,7 +127,7 @@ __device__ float3 getAlbedo(const HitGroupData* sbt)
         return make_float3(t.x, t.y, t.z);
     }
 
-    // No texture — interpolate vertex color
+    // No texture - interpolate vertex color
     return sbt->vertices[tri.x].color * b0
          + sbt->vertices[tri.y].color * bary.x
          + sbt->vertices[tri.z].color * bary.y;
@@ -214,7 +214,7 @@ extern "C" __global__ void __closesthit__ch()
     const float3 ray_direction = optixGetWorldRayDirection();
     const float3 hit_point     = ray_origin + t_hit * ray_direction;
 
-    const HitGroupData* sbt = (HitGroupData*)optixGetSbtDataPointer();
+    const HitGroupDataLambert* sbt = (HitGroupDataLambert*)optixGetSbtDataPointer();
 
     float3 world_normal = getTriangleNormal(sbt, ray_direction);
     float3 base_color   = getAlbedo(sbt);
@@ -269,9 +269,9 @@ extern "C" __global__ void __closesthit__glass()
     const float3 ray_direction = optixGetWorldRayDirection();
     const float3 hit_point     = ray_origin + t_hit * ray_direction;
 
-    const HitGroupData* sbt = (HitGroupData*)optixGetSbtDataPointer();
+    const HitGroupDataGlass* sbt = (HitGroupDataGlass*)optixGetSbtDataPointer();
 
-    // Compute normal (without flipping — we need the raw outward normal for IOR)
+    // Compute normal (without flipping - we need the raw outward normal for IOR)
     const int   prim_idx = optixGetPrimitiveIndex();
     const uint3 tri      = sbt->indices[prim_idx];
     const float3 v0 = sbt->vertices[tri.x].position;
@@ -291,7 +291,7 @@ extern "C" __global__ void __closesthit__glass()
     if (!entering)
         world_normal = world_normal * -1.0f;
 
-    float3 base_color = getAlbedo(sbt);
+    float3 base_color = make_float3(0,1,0);// = getAlbedo( sbt );
     float  ior        = sbt->refraction_index;
 
     unsigned int current_depth = optixGetPayload_3();

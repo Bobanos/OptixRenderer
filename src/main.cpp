@@ -43,7 +43,8 @@ struct Record
 
 typedef Record<RayGenData>   RayGenRecord;
 typedef Record<MissData>     MissRecord;
-typedef Record<HitGroupData> HitGroupRecord;
+typedef Record<HitGroupDataLambert> HitGroupRecordLambert;
+typedef Record<HitGroupDataGlass> HitGroupRecordGlass;
 
 // Camera instance (global for mouse callback)
 CameraController* g_camera = nullptr;
@@ -53,7 +54,7 @@ bool g_mouse_captured = false;
 // Utility: load 
 // ------------------------------------------------------------------
 
-static std::vector<char> loadFile(const std::string& path){
+static std::vector<char> loadFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f)
         throw std::runtime_error("Failed to open file: " + path);
@@ -262,7 +263,7 @@ private:
 // Main
 // ------------------------------------------------------------------
 
-int main(){
+int main() {
 
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -270,7 +271,7 @@ int main(){
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow* window = glfwCreateWindow(window_width, window_height, "Optix 9.1.0 PathTracer", NULL, NULL);
-    
+
     if (window == NULL)
     {
         std::cout << "[GLFW] Failed to create GLFW window" << std::endl;
@@ -301,7 +302,7 @@ int main(){
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 460");
 
-    try{
+    try {
         // ----------------------------------------------------------
         // CUDA + OptiX init
         // ----------------------------------------------------------
@@ -390,6 +391,7 @@ int main(){
 
         OPTIX_CHECK(optixProgramGroupCreate(context, &rg_desc, 1, &pg_opts, log, &logSize, &raygen_pg));
         OPTIX_CHECK(optixProgramGroupCreate(context, &ms_desc, 1, &pg_opts, log, &logSize, &miss_pg));
+
         OPTIX_CHECK(optixProgramGroupCreate(context, &hg_desc, 1, &pg_opts, log, &logSize, &hitgroup_pg));
         OPTIX_CHECK(optixProgramGroupCreate(context, &hg_glass_desc, 1, &pg_opts, log, &logSize, &hitgroup_glass_pg));
 
@@ -587,24 +589,25 @@ int main(){
         // SBT — exactly 2 hit records
         //   record 0 -> solid/__closesthit__ch  (vertices=solid buffer)
         //   record 1 -> glass/__closesthit__glass (vertices=glass buffer)
-        // ----------------------------------------------------------
-        HitGroupRecord hg_records[2] = {};
+        // ----------------------------------------------------------        
+
+        HitGroupRecordLambert hg_record_lambert = {};
+        HitGroupRecordGlass hg_record_glass = {};
 
         // Record 0: solid plastic
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_records[0]));
-        hg_records[0].data.vertices = (ColoredVertex*)d_solid_verts;
-        hg_records[0].data.indices = (uint3*)d_solid_indices;
-        hg_records[0].data.refraction_index = 1.0f;
-        hg_records[0].data.albedo_texture = 0; // vertex color carries per-material Kd
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_pg, &hg_record_lambert));
+        hg_record_lambert.data.vertices = (ColoredVertex*)d_solid_verts;
+        hg_record_lambert.data.indices = (uint3*)d_solid_indices;
+        hg_record_lambert.data.albedo = { 1.0f,0.0f,0.0f };
+        hg_record_lambert.data.albedo_texture = 0; // vertex color carries per-material Kd
 
         // Record 1: glass
-        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg_records[1]));
-        hg_records[1].data.vertices = (ColoredVertex*)d_glass_verts;
-        hg_records[1].data.indices = (uint3*)d_glass_indices;
-        hg_records[1].data.refraction_index = merged.glass_ior;
-        hg_records[1].data.albedo_texture = 0;
+        OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_pg, &hg_record_glass));
+        hg_record_glass.data.vertices = (ColoredVertex*)d_glass_verts;
+        hg_record_glass.data.indices = (uint3*)d_glass_indices;
+        hg_record_glass.data.refraction_index = merged.glass_ior;
 
-        CUdeviceptr d_rg, d_ms, d_hg;
+        CUdeviceptr d_rg, d_ms;
         RayGenRecord rg = {};
         OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &rg));
         CUDA_CHECK(cudaMalloc((void**)&d_rg, sizeof(RayGenRecord)));
@@ -615,8 +618,14 @@ int main(){
         CUDA_CHECK(cudaMalloc((void**)&d_ms, sizeof(MissRecord)));
         CUDA_CHECK(cudaMemcpy((void*)d_ms, &ms, sizeof(ms), cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMalloc((void**)&d_hg, sizeof(HitGroupRecord) * 2));
-        CUDA_CHECK(cudaMemcpy((void*)d_hg, hg_records, sizeof(HitGroupRecord) * 2, cudaMemcpyHostToDevice));
+        CUdeviceptr d_hg;
+        const size_t max_stride_in_bytes = max(sizeof(HitGroupRecordLambert), sizeof(HitGroupRecordGlass));
+        CUDA_CHECK(cudaMalloc((void**)&d_hg, max_stride_in_bytes * 2));
+
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + max_stride_in_bytes * 0), &hg_record_lambert, sizeof(HitGroupRecordLambert), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy((void*)(d_hg + max_stride_in_bytes * 1), &hg_record_glass, sizeof(HitGroupRecordGlass), cudaMemcpyHostToDevice));
+
+
 
         OptixShaderBindingTable sbt = {};
         sbt.raygenRecord = d_rg;
@@ -624,7 +633,7 @@ int main(){
         sbt.missRecordStrideInBytes = sizeof(MissRecord);
         sbt.missRecordCount = 1;
         sbt.hitgroupRecordBase = d_hg;
-        sbt.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
+        sbt.hitgroupRecordStrideInBytes = max_stride_in_bytes;
         sbt.hitgroupRecordCount = 2;
 
 
@@ -689,7 +698,7 @@ int main(){
         // ----------------------------------------------------------
         while (!glfwWindowShouldClose(window))
         {
-            // Calculate delta time - ADDED
+            // Calculate delta time
             float currentFrame = (float)glfwGetTime();
             deltaTime = currentFrame - lastFrame;
             lastFrame = currentFrame;
@@ -865,9 +874,8 @@ int main(){
         }
         CUDA_CHECK(cudaFree((void*)d_gas_output));
         CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
-        CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
     }
-    catch (const std::exception& e){
+    catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;
 
         // Cleanup ImGui
