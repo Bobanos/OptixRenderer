@@ -28,6 +28,7 @@ struct Light {
 
 struct Params {
     uchar4* image;
+    float3* accum_buffer; 
     int     width;
     int     height;
     Camera  camera;
@@ -37,7 +38,14 @@ struct Params {
     Light   lights[4];
     int     num_lights;
 
-    int max_recursion_depth;
+    int     max_bounce_depth;
+    int     samples_per_pixel;
+    int     current_sample;
+    unsigned int random_seed;
+
+    // Russian roulette parameters
+    float   rr_threshold;       // Starting probability (e.g., 0.8 = 80% chance to continue)
+    float   rr_decay;           // How much to reduce probability per bounce (e.g., 0.95)
 };
 
 struct RayGenData {};

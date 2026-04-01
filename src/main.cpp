@@ -619,13 +619,27 @@ int main() {
         // Output buffer + Display
         // ----------------------------------------------------------
         CUdeviceptr d_pixels;
+        CUdeviceptr d_accum_buffer;
+
         CUDA_CHECK(cudaMalloc((void**)&d_pixels, width * height * sizeof(uchar4)));
+        CUDA_CHECK(cudaMalloc((void**)&d_accum_buffer, width * height * sizeof(float3)));
 
         Params params = {};
         params.image = (uchar4*)d_pixels;
+        params.accum_buffer = (float3*)d_accum_buffer;
         params.width = width;
         params.height = height;
         params.traversable = ias_handle;
+
+        // Path tracer settings
+        params.max_bounce_depth = 4;      // Start with 4 bounces
+        params.samples_per_pixel = 2;     // Progressive sampling
+        params.current_sample = 0;
+        params.random_seed = 1415;
+
+        // Russian roulette settings
+        params.rr_threshold = 0.95f;           // 95% chance to continue
+        params.rr_decay = 0.96f;               // Reduce by 4% per bounce
 
         // Initialize lights
         params.num_lights = 3;
@@ -716,23 +730,31 @@ int main() {
 
             params.traversable = ias_handle;
 
-            // Update camera parameters
-            params.camera = camera_controller.getCameraData();
-            CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
+            // Accumulate samples
+            for (int sample = 0; sample < params.samples_per_pixel; ++sample) {
+                params.current_sample = sample;
 
-            // OptiX render
-            OPTIX_CHECK(optixLaunch(
-                pipeline,
-                0,
-                d_params,
-                sizeof(Params),
-                &sbt,
-                width,
-                height,
-                1
-            ));
+                // Update random seed each sample
+                params.random_seed = params.random_seed * 1103515245 + 12345;
 
-            CUDA_CHECK(cudaDeviceSynchronize());
+                // Update camera parameters
+                params.camera = camera_controller.getCameraData();
+                CUDA_CHECK(cudaMemcpy((void*)d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
+
+                // OptiX render
+                OPTIX_CHECK(optixLaunch(
+                    pipeline,
+                    0,
+                    d_params,
+                    sizeof(Params),
+                    &sbt,
+                    width,
+                    height,
+                    1
+                ));
+
+                CUDA_CHECK(cudaDeviceSynchronize());
+            }
 
             // Copy OptiX output to OpenGL texture
             display.copyFromDevice(d_pixels);
@@ -840,6 +862,58 @@ int main() {
                 ship_rotation_x = ship_rotation_y = ship_rotation_z = 0.0f;
             ImGui::End();
 
+            // Ship Controls window (add this section after the existing one)
+            ImGui::Begin("Path Tracer Settings");
+
+            // Samples per pixel - NOW ADJUSTABLE
+            static int spp_input = params.samples_per_pixel;
+            if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
+                spp_input = fmaxf(1, spp_input);
+                params.samples_per_pixel = spp_input;
+                // Reset accumulation when changing samples
+                CUDA_CHECK(cudaMemset((void*)d_accum_buffer, 0, width * height * sizeof(float3)));  //TODO
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Number of samples to accumulate per frame.\nLower = faster but noisier.\nHigher = slower but cleaner.");
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Russian Roulette");
+
+            // RR Threshold slider
+            if (ImGui::SliderFloat("RR Threshold##threshold", &params.rr_threshold, 0.5f, 1.0f, "%.3f")) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("Initial probability of continuing path (higher = more bounces)");
+                }
+            }
+
+            // RR Decay slider
+            if (ImGui::SliderFloat("RR Decay##decay", &params.rr_decay, 0.85f, 0.99f, "%.3f")) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("Rate of probability decrease per bounce (higher = longer paths)");
+                }
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Render Settings");
+
+            // Max bounce depth (kept for reference, but RR is primary termination)
+            if (ImGui::SliderInt("Max Bounce Depth##depth", &params.max_bounce_depth, 4, 256)) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("Hard limit on bounces (Russian roulette usually terminates before this)");
+                }
+            }
+
+            ImGui::End();
+
             // Render ImGui
             ImGui::Render();
 
@@ -868,6 +942,7 @@ int main() {
         CUDA_CHECK(cudaFree((void*)d_sbt_indices));
         CUDA_CHECK(cudaFree((void*)d_gas_output));
         CUDA_CHECK(cudaFree((void*)d_ias_temp_rt));
+        CUDA_CHECK(cudaFree((void*)d_accum_buffer));
     }
     catch (const std::exception& e) {
         std::cerr << "Exception: " << e.what() << std::endl;

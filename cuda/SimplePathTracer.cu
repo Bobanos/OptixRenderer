@@ -7,6 +7,8 @@ extern "C" {
 __constant__ Params params;
 }
 
+#define M_PI 3.14159265358979323846f
+
 // Helper functions
 __device__ float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
@@ -26,6 +28,14 @@ __device__ float3 operator*(const float3& v, float t) {
 
 __device__ float3 operator*(const float3& v, const float3& t) {
     return make_float3(v.x * t.x, v.y * t.y, v.z * t.z);
+}
+
+__device__ float3 operator/(const float3& v, const float3& t) {
+    return make_float3(v.x / t.x, v.y / t.y, v.z / t.z);
+}
+
+__device__ float3 operator/(const float3& v, const float t) {
+    return make_float3(v.x / t, v.y / t, v.z / t);
 }
 
 __device__ float3 operator+(const float3& v, float t) {
@@ -54,6 +64,54 @@ __device__ float3 clamp(const float3& v, float min_val, float max_val) {
         fminf(fmaxf(v.x, min_val), max_val),
         fminf(fmaxf(v.y, min_val), max_val),
         fminf(fmaxf(v.z, min_val), max_val)
+    );
+}
+
+__device__ float3 cross(const float3& a, const float3& b) {
+    return make_float3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    );
+}
+
+// ------------------------------------------------------------------
+// Simple Linear Congruential Generator (LCG) for random numbers
+// ------------------------------------------------------------------
+__device__ unsigned int lcg_next(unsigned int& seed) {
+    const unsigned int LCG_A = 1664525u;
+    const unsigned int LCG_C = 22695477u;
+    seed = LCG_A * seed + LCG_C;
+    return seed;
+}
+
+__device__ float random_float(unsigned int& seed) {
+    return (lcg_next(seed) & 0xFFFFFF) / 16777216.0f; // 24-bit precision
+}
+
+// Random direction in hemisphere (cosine-weighted for Lambertian)
+__device__ float3 random_hemisphere_direction(const float3& normal, unsigned int& seed) {
+    float u = random_float(seed);
+    float v = random_float(seed);
+    
+    // Cosine-weighted hemisphere sampling
+    float r = sqrtf(u);
+    float theta = 2.0f * M_PI * v;
+    
+    float x = r * cosf(theta);
+    float y = r * sinf(theta);
+    float z = sqrtf(1.0f - u); // Cosine-weighted
+    
+    // Build orthonormal basis from normal
+    float3 up = fabsf(normal.y) < 0.999f ? make_float3(0.0f, 1.0f, 0.0f) : make_float3(1.0f, 0.0f, 0.0f);
+    float3 right = normalize(cross(normal, up));
+    float3 forward = cross(right, normal);
+    
+    // Transform to world space
+    return normalize(
+        x * right +
+        y * forward +
+        z * normal
     );
 }
 
@@ -133,6 +191,15 @@ __device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
          + sbt->vertices[tri.z].color * bary.y;
 }
 
+// Russian roulette termination
+__device__ float russian_roulette_probability(unsigned int depth, float threshold, float decay) {
+    // Probability of continuing the path
+    // Decreases with depth to naturally terminate paths
+    float prob = threshold * powf(decay, (float)depth);
+    prob = fmaxf(prob, 0.05f);  // Clamp minimum probability to avoid division issues
+    return prob;
+}
+
 // ------------------------------------------------------------------
 // Ray generation
 // ------------------------------------------------------------------
@@ -145,9 +212,18 @@ extern "C" __global__ void __raygen__rg()
 
     const int i = idx.y * params.width + idx.x;
 
-    // Calculate normalized pixel coordinates (0 to 1)
-    float u = (float)idx.x / (float)(params.width - 1);
-    float v = (float)idx.y / (float)(params.height - 1);
+    // Initialize random seed per pixel (different for each sample)
+    unsigned int seed = params.random_seed + (idx.x * 73856093 ^ idx.y * 19349663 ^ params.current_sample * 83492791);
+
+    // Calculate normalized pixel coordinates with jitter for antialiasing
+    float jitter_x = random_float(seed);
+    float jitter_y = random_float(seed);
+    
+    float u = (float)idx.x + jitter_x / (float)(params.width - 1);
+    float v = (float)idx.y + jitter_y / (float)(params.height - 1);
+    
+    u = u / (float)(params.width);
+    v = v / (float)(params.height);
 
     // Generate ray from camera
     float3 ray_origin = params.camera.origin;
@@ -158,20 +234,20 @@ extern "C" __global__ void __raygen__rg()
         params.camera.origin
     );
 
-    // Trace ray
-    unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0;  // Payload for color
+    // Trace ray - pass seed in payload slot 3
+    unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0;
     optixTrace(
         params.traversable,
         ray_origin,
         ray_direction,
-        0.001f,              // tmin
-        1e16f,               // tmax
-        0.0f,                // rayTime
+        0.001f,
+        1e16f,
+        0.0f,
         OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_NONE,
-        0,                   // SBT offset
-        1,                   // SBT stride
-        0,                   // missSBTIndex
+        0,
+        1,
+        0,
         p0, p1, p2, p3
     );
 
@@ -179,15 +255,27 @@ extern "C" __global__ void __raygen__rg()
     float r = __uint_as_float(p0);
     float g = __uint_as_float(p1);
     float b = __uint_as_float(p2);
+    
+    float3 sample_color = make_float3(r, g, b);
 
+    // Accumulate into buffer
+    if (params.current_sample == 0) {
+        params.accum_buffer[i] = sample_color;
+    } else {
+        // Weighted average: older samples have less weight as we accumulate
+        float weight = 1.0f / (float)(params.current_sample + 1);
+        params.accum_buffer[i] = params.accum_buffer[i] * (1.0f - weight) + sample_color * weight;
+    }
+
+    // Convert to uchar4 for display
+    float3 final_color = clamp(params.accum_buffer[i], 0.0f, 1.0f);
     params.image[i] = make_uchar4(
-        (unsigned char)(r * 255.99f),
-        (unsigned char)(g * 255.99f),
-        (unsigned char)(b * 255.99f),
+        (unsigned char)(final_color.x * 255.99f),
+        (unsigned char)(final_color.y * 255.99f),
+        (unsigned char)(final_color.z * 255.99f),
         255
     );
 }
-
 // ------------------------------------------------------------------
 // Miss: sky gradient
 // ------------------------------------------------------------------
@@ -220,11 +308,17 @@ extern "C" __global__ void __closesthit__ch()
     float3 base_color   = getAlbedo(sbt);
 
     if (length_squared(base_color) < 0.001f)
-        base_color = make_float3(1.0f, 0.0f, 1.0f); // magenta = error
+        base_color = make_float3(1.0f, 0.0f, 1.0f);
 
-    // Accumulate lighting from all lights
-    float3 total_diffuse = make_float3(0.0f, 0.0f, 0.0f);
+    unsigned int depth = optixGetPayload_3();
+    
+    // Initialize seed for this bounce
+    unsigned int seed = params.random_seed + (depth * 12345) + 
+                        __float_as_uint(hit_point.x) ^ __float_as_uint(hit_point.y);
 
+    // Direct lighting
+    float3 direct_color = make_float3(0.0f, 0.0f, 0.0f);
+    
     for (int light_idx = 0; light_idx < params.num_lights; light_idx++) {
         const Light& light = params.lights[light_idx];
         float3 light_dir;
@@ -232,13 +326,11 @@ extern "C" __global__ void __closesthit__ch()
         float atten = 1.0f;
 
         if (light.type == 0) {
-            // Point light
             float3 to_light = light.position_or_direction - hit_point;
             distance_to_light = length(to_light);
             light_dir = normalize(to_light);
             atten = 1.0f / (1.0f + 0.1f * distance_to_light);
         } else {
-            // Directional light
             light_dir = normalize(light.position_or_direction);
             distance_to_light = 1e16f;
             atten = 1.0f;
@@ -260,18 +352,53 @@ extern "C" __global__ void __closesthit__ch()
 
         float shadow  = shadow_hit ? 1.0f : 0.0f;
         float ndotl   = fmaxf(0.0f, dot(world_normal, light_dir));
-        total_diffuse = total_diffuse + light.color * ndotl * atten * shadow;
+        direct_color = direct_color + light.color * ndotl * atten * shadow;
     }
 
-    float3 ambient = make_float3(0.1f, 0.1f, 0.1f);
-    float3 color   = clamp(ambient + base_color * total_diffuse, 0.0f, 1.0f);
+    float3 ambient = make_float3(0.02f, 0.02f, 0.02f);
+    direct_color = direct_color + ambient;
 
-    optixSetPayload_0(__float_as_uint(color.x));
-    optixSetPayload_1(__float_as_uint(color.y));
-    optixSetPayload_2(__float_as_uint(color.z));
+    // Russian roulette path termination
+    float rr_prob = russian_roulette_probability(depth, params.rr_threshold, params.rr_decay);
+    float rr_random = random_float(seed);
+    
+    if (rr_random < rr_prob && depth < params.max_bounce_depth) {
+        // Continue path with weighted contribution to account for probability
+        float3 bounce_dir = random_hemisphere_direction(world_normal, seed);
+
+        unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = depth + 1;
+        optixTrace(
+            params.traversable,
+            hit_point + world_normal * 0.001f,
+            bounce_dir,
+            0.001f,
+            1e16f,
+            0.0f,
+            OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_NONE,
+            0, 1, 0,
+            p0, p1, p2, p3
+        );
+
+        float3 indirect_color = make_float3(
+            __uint_as_float(p0),
+            __uint_as_float(p1),
+            __uint_as_float(p2)
+        );
+
+        // Divide by probability to account for Russian roulette
+        float3 final_color = direct_color * base_color + base_color * indirect_color / rr_prob;
+        
+        optixSetPayload_0(__float_as_uint(final_color.x));
+        optixSetPayload_1(__float_as_uint(final_color.y));
+        optixSetPayload_2(__float_as_uint(final_color.z));
+    } else {
+        // Path terminated by Russian roulette
+        optixSetPayload_0(__float_as_uint(direct_color.x));
+        optixSetPayload_1(__float_as_uint(direct_color.y));
+        optixSetPayload_2(__float_as_uint(direct_color.z));
+    }
 }
-
-
 // ------------------------------------------------------------------
 // Closest hit: glass/refractive
 // ------------------------------------------------------------------
