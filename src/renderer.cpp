@@ -395,7 +395,7 @@ void OptixRenderer::setupLighting() {
     params.rr_threshold = 0.95f;   // 95% chance to continue
     params.rr_decay = 0.96f;       // Reduce by 4% per bounce
 
-    DEBUG_LOGF("[Lighting] Setup complete ,d% lights", params.num_lights);
+    DEBUG_LOGF("[Lighting] Setup complete %d lights", params.num_lights);
 }
 
 void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
