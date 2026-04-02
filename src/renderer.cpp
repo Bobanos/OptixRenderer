@@ -299,6 +299,9 @@ void OptixRenderer::buildSBT() {
 
     std::vector<char> hit_records;
 
+    material_textures.clear();
+    material_textures.resize(merged_mesh.materials.size());
+
     for (size_t mat_idx = 0; mat_idx < merged_mesh.materials.size(); ++mat_idx) {
         const auto& mat = merged_mesh.materials[mat_idx];
 
@@ -318,7 +321,19 @@ void OptixRenderer::buildSBT() {
             rec.data.vertices = (ColoredVertex*)device_buffers.d_vertices;
             rec.data.indices = (uint3*)device_buffers.d_indices;
             rec.data.albedo = mat.color;
-            rec.data.albedo_texture = 0;
+
+            // Load texture if available
+            if (!mat.texture_path.empty()) {
+                material_textures[mat_idx].albedo_tex = loadTextureFromFile(
+                    mat.texture_path,
+                    material_textures[mat_idx].albedo_array
+                );
+                rec.data.albedo_texture = material_textures[mat_idx].albedo_tex;
+                DEBUG_LOGF("[Texture] Loaded for material %zu: %s", mat_idx, mat.texture_path.c_str());
+            }
+            else {
+                rec.data.albedo_texture = 0;
+            }
 
             hit_records.resize(hit_records.size() + max_stride);
             std::memcpy(hit_records.data() + mat_idx * max_stride, &rec, sizeof(HitGroupRecordLambert));
@@ -437,6 +452,17 @@ void OptixRenderer::resetAccumulationBuffer() {
 void OptixRenderer::cleanup() {
     if (pipeline) optixPipelineDestroy(pipeline);
     if (context) optixDeviceContextDestroy(context);
+
+    // Clean up textures
+    for (auto& mat_tex : material_textures) {
+        if (mat_tex.albedo_tex) {
+            CUDA_CHECK(cudaDestroyTextureObject(mat_tex.albedo_tex));
+        }
+        if (mat_tex.albedo_array) {
+            CUDA_CHECK(cudaFreeArray(mat_tex.albedo_array));
+        }
+    }
+    material_textures.clear();
 
     CUDA_CHECK(cudaFree((void*)device_buffers.d_pixels));
     CUDA_CHECK(cudaFree((void*)device_buffers.d_accum_buffer));

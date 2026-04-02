@@ -123,6 +123,12 @@ private:
     // Host params
     Params params = {};
 
+    struct MaterialTextures {
+        cudaTextureObject_t albedo_tex = 0;
+        cudaArray_t albedo_array = nullptr;
+    };
+    std::vector<MaterialTextures> material_textures;
+
 	//Model transform state
     float ship_rotation_x = 0.0f;
     float ship_rotation_y = 0.0f;
