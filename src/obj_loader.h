@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include "optix_params.h"
+#include "float3_math.h"
 
 struct ObjMesh {
     std::string                material_name;
@@ -176,14 +177,55 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
         if (!mesh.texture_path.empty())
             mesh.texture_path = asset_dir + mesh.texture_path;
 
-        float3 col = mat_color.count(mat) ? mat_color[mat] : make_float3(0.8f, 0.8f, 0.8f);
+        float3 color = mat_color.count(mat) ? mat_color[mat] : make_float3(0.8f, 0.8f, 0.8f);
+
+        // First pass: add vertices and calculate area-weighted normals
+        std::unordered_map<size_t, float3> vertex_normal_accum;
 
         for (size_t i = 0; i < corners.size(); i += 3) {
             uint32_t base = (uint32_t)mesh.vertices.size();
-            mesh.vertices.push_back({ corners[i + 0].pos, col, corners[i + 0].uv });
-            mesh.vertices.push_back({ corners[i + 1].pos, col, corners[i + 1].uv });
-            mesh.vertices.push_back({ corners[i + 2].pos, col, corners[i + 2].uv });
+
+            // Get the three positions for this triangle
+            const float3& p0 = corners[i + 0].pos;
+            const float3& p1 = corners[i + 1].pos;
+            const float3& p2 = corners[i + 2].pos;
+
+            // Calculate area-weighted normal using cross product
+            float3 e1 = make_float3(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+            float3 e2 = make_float3(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
+            float3 face_normal = make_float3(
+                e1.y * e2.z - e1.z * e2.y,
+                e1.z * e2.x - e1.x * e2.z,
+                e1.x * e2.y - e1.y * e2.x
+            );
+            // Cross product magnitude is 2 * triangle area, so we get area-weighting for free
+
+            // Add vertices with zero normals (to be filled in next pass)
+            mesh.vertices.push_back({ p0, color, make_float3(0.f, 0.f, 0.f), corners[i + 0].uv });
+            mesh.vertices.push_back({ p1, color, make_float3(0.f, 0.f, 0.f), corners[i + 1].uv });
+            mesh.vertices.push_back({ p2, color, make_float3(0.f, 0.f, 0.f), corners[i + 2].uv });
             mesh.indices.push_back(make_uint3(base, base + 1, base + 2));
+
+            // Accumulate area-weighted normal to each vertex
+            vertex_normal_accum[base] = vertex_normal_accum[base] + face_normal;
+            vertex_normal_accum[base + 1] = vertex_normal_accum[base + 1] + face_normal;
+            vertex_normal_accum[base + 2] = vertex_normal_accum[base + 2] + face_normal;
+        }
+
+        // Second pass: normalize vertex normals and write back to vertices
+        for (auto& [vertex_idx, normal] : vertex_normal_accum) {
+            float len = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+            if (len > 1e-6f) {
+                mesh.vertices[vertex_idx].normal = make_float3(
+                    normal.x / len,
+                    normal.y / len,
+                    normal.z / len
+                );
+            }
+            else {
+                // Fallback: use a default normal if accumulation failed
+                mesh.vertices[vertex_idx].normal = make_float3(0.f, 1.f, 0.f);
+            }
         }
 
         meshes.push_back(std::move(mesh));

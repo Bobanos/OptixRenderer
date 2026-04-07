@@ -61,6 +61,7 @@ add_executable(optix_renderer
     src/optix_params.h
     src/obj_loader.h
     src/stb_image_impl.cpp
+    src/float3_math.h
 )
 
 target_include_directories(optix_renderer PRIVATE

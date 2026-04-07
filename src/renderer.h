@@ -76,6 +76,7 @@ public:
     void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
     void setShipRotation(float rotation_x, float rotation_y, float rotation_z);
 
+    void updateCamera(const Camera& camera);
     void resetAccumulationBuffer();
 
 private:
@@ -133,6 +134,8 @@ private:
     float ship_rotation_x = 0.0f;
     float ship_rotation_y = 0.0f;
     float ship_rotation_z = 0.0f;
+
+    Camera last_camera = {};
 
     void rebuildIAS();
 

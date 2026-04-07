@@ -295,6 +295,7 @@ int main() {
             }
 
             {
+				renderer->updateCamera(camera_controller.getCameraData());
                 // Render
                 renderer->render(camera_controller.getCameraData(), renderer->getParams().samples_per_pixel);
 

@@ -2,78 +2,13 @@
 #include <optix_device.h>
 
 #include "optix_params.h"
+#include "float3_math.h"
 
 extern "C" {
 __constant__ Params params;
 }
 
 #define M_PI 3.14159265358979323846f
-
-// Helper functions
-__device__ float3 operator+(const float3& a, const float3& b) {
-    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
-}
-
-__device__ float3 operator-(const float3& a, const float3& b) {
-    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-__device__ float3 operator*(float t, const float3& v) {
-    return make_float3(t * v.x, t * v.y, t * v.z);
-}
-
-__device__ float3 operator*(const float3& v, float t) {
-    return make_float3(v.x * t, v.y * t, v.z * t);
-}
-
-__device__ float3 operator*(const float3& v, const float3& t) {
-    return make_float3(v.x * t.x, v.y * t.y, v.z * t.z);
-}
-
-__device__ float3 operator/(const float3& v, const float3& t) {
-    return make_float3(v.x / t.x, v.y / t.y, v.z / t.z);
-}
-
-__device__ float3 operator/(const float3& v, const float t) {
-    return make_float3(v.x / t, v.y / t, v.z / t);
-}
-
-__device__ float3 operator+(const float3& v, float t) {
-    return make_float3(v.x + t, v.y + t, v.z + t);
-}
-
-__device__ float dot(const float3& a, const float3& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-__device__ float length(const float3& v) {
-    return sqrtf(dot(v, v));
-}
-
-__device__ float length_squared(const float3& v) {
-    return dot(v, v);
-}
-
-__device__ float3 normalize(const float3& v) {
-    float len = length(v);
-    return make_float3(v.x / len, v.y / len, v.z / len);
-}
-
-__device__ float3 clamp(const float3& v, float min_val, float max_val) {
-    return make_float3(
-        fminf(fmaxf(v.x, min_val), max_val),
-        fminf(fmaxf(v.y, min_val), max_val),
-        fminf(fmaxf(v.z, min_val), max_val)
-    );
-}
-
-__device__ float3 cross(const float3& a, const float3& b) {
-    return make_float3(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x
-    );
-}
 
 // ------------------------------------------------------------------
 // Simple Linear Congruential Generator (LCG) for random numbers
@@ -134,7 +69,7 @@ __device__ float3 getVertexColor(const HitGroupDataCommon * sbt)
 // ------------------------------------------------------------------
 // Helper: compute world-space normal for the hit triangle
 // ------------------------------------------------------------------
-__device__ float3 getTriangleNormal(const HitGroupDataCommon* sbt, const float3& ray_dir)
+__device__ float3 getGeometricNormal(const HitGroupDataCommon* sbt, const float3& ray_dir)
 {
     const int   prim_idx = optixGetPrimitiveIndex();
     const uint3 tri      = sbt->indices[prim_idx];
@@ -146,13 +81,42 @@ __device__ float3 getTriangleNormal(const HitGroupDataCommon* sbt, const float3&
     float3 e1 = v1 - v0;
     float3 e2 = v2 - v0;
     float3 object_normal = make_float3(
-        e1.y*e2.z - e1.z*e2.y,
-        e1.z*e2.x - e1.x*e2.z,
-        e1.x*e2.y - e1.y*e2.x);
+        (e1.y*e2.z - e1.z*e2.y),
+        (e1.z*e2.x - e1.x*e2.z),
+        (e1.x*e2.y - e1.y*e2.x));
 
     float3 world_normal = normalize(
         optixTransformNormalFromObjectToWorldSpace(object_normal));
 
+    // Flip if facing away from ray
+    if (dot(world_normal, ray_dir) > 0.0f)
+        world_normal = world_normal * -1.0f;
+
+    return world_normal;
+}
+
+__device__ float3 getInterpolatedNormal(const HitGroupDataCommon* sbt, const float3& ray_dir)
+{
+    const int   prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri      = sbt->indices[prim_idx];
+    const float2 bary    = optixGetTriangleBarycentrics();
+    const float  b0      = 1.0f - bary.x - bary.y;
+    const float  b1       = bary.x;
+    const float  b2       = bary.y;
+
+    float3 world_normal;
+    //if (sbt->hasVertexNormals) {
+        const float3 n0 = sbt->vertices[tri.x].normal;
+        const float3 n1 = sbt->vertices[tri.y].normal;
+        const float3 n2 = sbt->vertices[tri.z].normal;
+
+        float3 object_normal = b0 * n0 + b1 * n1 + b2 * n2;
+
+        world_normal = normalize(
+            optixTransformNormalFromObjectToWorldSpace(object_normal));
+    //} else {
+    //     world_normal = getGeometricNormal(sbt, ray_dir);
+    //}
     // Flip if facing away from ray
     if (dot(world_normal, ray_dir) > 0.0f)
         world_normal = world_normal * -1.0f;
@@ -263,7 +227,7 @@ extern "C" __global__ void __raygen__rg()
         params.accum_buffer[i] = sample_color;
     } else {
         // Weighted average: older samples have less weight as we accumulate
-        float weight = 1.0f / (float)(params.current_sample + 1);
+        float weight = 1.0f / (float)(params.current_sample);
         params.accum_buffer[i] = params.accum_buffer[i] * (1.0f - weight) + sample_color * weight;
     }
 
@@ -304,7 +268,7 @@ extern "C" __global__ void __closesthit__ch()
 
     const HitGroupDataLambert* sbt = (HitGroupDataLambert*)optixGetSbtDataPointer();
 
-    float3 world_normal = getTriangleNormal(sbt, ray_direction);
+    float3 world_normal = getInterpolatedNormal(sbt, ray_direction);
     float3 base_color   = getAlbedo(sbt);
 
     if (length_squared(base_color) < 0.001f)

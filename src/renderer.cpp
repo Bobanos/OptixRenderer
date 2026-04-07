@@ -412,8 +412,8 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
     params.camera = camera;
     params.traversable = ias_handle;
 
-    for (int sample = 0; sample < samples_per_pixel; ++sample) {
-        params.current_sample = sample;
+    for (int i = 0; i < samples_per_pixel; ++i) {
+        params.current_sample++;
         params.random_seed = params.random_seed * 1103515245 + 12345;
 
         CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
@@ -423,6 +423,7 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 
         CUDA_CHECK(cudaDeviceSynchronize());
     }
+	DEBUG_LOGF("%d", params.current_sample);
 }
 
 void OptixRenderer::updateInstanceTransform(const float transform[12]) {
@@ -447,6 +448,7 @@ void OptixRenderer::resetAccumulationBuffer() {
         CUDA_CHECK(cudaMemset((void*)device_buffers.d_accum_buffer, 0, params.width * params.height * sizeof(float3)));
 		DEBUG_LOG("[Render] Accumulation buffer reset");
     }
+	params.current_sample = 0;
 }
 
 void OptixRenderer::cleanup() {
@@ -615,4 +617,23 @@ void OptixRenderer::rebuildIAS() {
 
     CUDA_CHECK(cudaFree((void*)d_ias_temp));
     DEBUG_LOG("[IAS] Rebuilt");
+}
+
+void OptixRenderer::updateCamera(const Camera& camera) {
+    // Check if camera has moved significantly
+    float3 pos_diff = camera.origin - last_camera.origin;
+    float pos_distance = sqrtf(pos_diff.x * pos_diff.x + pos_diff.y * pos_diff.y + pos_diff.z * pos_diff.z);
+
+    // Check if camera direction changed significantly
+    float3 dir_diff = camera.lower_left_corner - last_camera.lower_left_corner;
+    float dir_distance = sqrtf(dir_diff.x * dir_diff.x + dir_diff.y * dir_diff.y + dir_diff.z * dir_diff.z);
+
+    if (pos_distance > 0.001f || dir_distance > 0.001f) {
+        // Camera moved - reset accumulation
+        resetAccumulationBuffer();
+        DEBUG_LOG("[Camera] Moved - accumulation reset");
+    }
+
+
+    last_camera = camera;
 }

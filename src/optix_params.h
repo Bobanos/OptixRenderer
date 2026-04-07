@@ -15,6 +15,7 @@ struct Camera {
 struct ColoredVertex {
     float3 position;
     float3 color;
+    float3 normal;
     float2 uv;
 };
 
