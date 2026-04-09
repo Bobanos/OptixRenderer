@@ -9,6 +9,7 @@
 #include <cuda_runtime.h>
 
 #include "optix_params.h"
+#include "stb_image.h"
 #include "float3_math.h"
 
 struct ObjMesh {
@@ -295,4 +296,49 @@ inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
             << "\n";
     }
     return result;
+}
+
+inline cudaTextureObject_t loadEnvmap(const std::string& path) {
+    int width, height, channels;
+    // stbi_loadf gives float RGBA
+    float* data = stbi_loadf(path.c_str(), &width, &height, &channels, 4);
+
+    if (!data) {
+        std::cerr << "[ENVMAP] Failed to load image: " << path << std::endl;
+        return 0;
+    }
+
+    if (width <= 0 || height <= 0) {
+        std::cerr << "[ENVMAP] Invalid dimensions: " << width << "x" << height << std::endl;
+        stbi_image_free(data);
+        return 0;
+    }
+
+    // Upload to a CUDA array
+    cudaChannelFormatDesc fmt = cudaCreateChannelDesc<float4>(); // fp16 saves VRAM
+    cudaArray_t cuArray;
+    cudaMallocArray(&cuArray, &fmt, width, height);
+
+    // Convert float4 -> half4 if using fp16, or use cudaCreateChannelDesc<float4>()
+    cudaMemcpy2DToArray(cuArray, 0, 0, data,
+        width * 4 * sizeof(float),
+        width * 4 * sizeof(float), height,
+        cudaMemcpyHostToDevice);
+    stbi_image_free(data);
+
+    // Create texture object with linear filtering
+    cudaResourceDesc resDesc = {};
+    resDesc.resType = cudaResourceTypeArray;
+    resDesc.res.array.array = cuArray;
+
+    cudaTextureDesc texDesc = {};
+    texDesc.addressMode[0] = cudaAddressModeWrap;
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1;
+
+    cudaTextureObject_t tex;
+    cudaCreateTextureObject(&tex, &resDesc, &texDesc, nullptr);
+    return tex;
 }

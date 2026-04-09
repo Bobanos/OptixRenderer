@@ -216,6 +216,7 @@ int main() {
         renderer->initCUDA();
         renderer->initOptix();
         renderer->loadScene("assets/6887_allied_avenger.obj", "assets/6887_allied_avenger.mtl");
+		renderer->loadMap("assets/golden_gate_hills_2k.hdr");
         renderer->setupShaders();
         renderer->buildAccelerationStructures();
         renderer->setupLighting();
@@ -287,6 +288,8 @@ int main() {
                 (ship_rotation_y != last_rotation_y) ||
                 (ship_rotation_z != last_rotation_z);
 
+			bool light_changed = false; 
+
             if (rotation_changed) {
                 renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
                 last_rotation_x = ship_rotation_x;
@@ -343,6 +346,10 @@ int main() {
             static float light2_dir[3] = { 0.0f, -1.0f, -0.2f };
             static float light2_col[3] = { 0.5f, 0.5f, 0.5f };
 
+			static float env_map_scale = renderer->getParams().envmap_scale;
+			static float env_map_expo = renderer->getParams().envmap_exposure;
+            
+
             if (g_mouse_captured) {
                 ImGui::BeginDisabled();
             }
@@ -351,9 +358,11 @@ int main() {
             ImGui::Text("Point Light 1 (Red)");
             if (ImGui::DragFloat3("Light 1 Position", light0_pos, 0.1f, -20.0f, 20.0f)) {
 				renderer->updateLightParametersPos(0, make_float3(light0_pos[0], light0_pos[1], light0_pos[2]));
+				light_changed = true;
             }
             if (ImGui::ColorEdit3("Light 1 Color", light0_col)) {
                 renderer->updateLightParametersColor(0, make_float3(light0_col[0], light0_col[1], light0_col[2]));
+                light_changed = true;
             }
             ImGui::Separator();
 
@@ -361,9 +370,11 @@ int main() {
             ImGui::Text("Point Light 2 (Blue)");
             if (ImGui::DragFloat3("Light 2 Position", light1_pos, 0.1f, -20.0f, 20.0f)) {
 				renderer->updateLightParametersPos(1, make_float3(light1_pos[0], light1_pos[1], light1_pos[2]));
+                light_changed = true;
             }
             if (ImGui::ColorEdit3("Light 2 Color", light1_col)) {
 				renderer->updateLightParametersColor(1, make_float3(light1_col[0], light1_col[1], light1_col[2]));
+                light_changed = true;
             }
             ImGui::Separator();
 
@@ -371,9 +382,26 @@ int main() {
             ImGui::Text("Directional Light");
             if (ImGui::DragFloat3("Light 3 Direction", light2_dir, 0.05f, 100.0f, 1.0f)) {
 				renderer->updateLightParametersPos(2, normalize(make_float3(light2_dir[0], light2_dir[1], light2_dir[2])));
+                light_changed = true;
             }
             if (ImGui::ColorEdit3("Light 3 Color", light2_col)) {
 				renderer->updateLightParametersColor(2, make_float3(light2_col[0], light2_col[1], light2_col[2]));
+                light_changed = true;
+            }
+
+            ImGui::Text("Enviromental Map Settings");
+            if (ImGui::DragFloat("Scale", &env_map_scale, 0.05f, 0.f, 100.0f)) {
+                renderer->updateEnvmapParameters(env_map_scale, env_map_expo);
+                light_changed = true;
+            }
+
+            if (ImGui::DragFloat("Exposure", &env_map_expo, 0.05f, 100.0f, 1.0f)) {
+                renderer->updateEnvmapParameters(env_map_scale, env_map_expo);
+                light_changed = true;
+            }
+
+            if (light_changed) {
+                renderer->resetAccumulationBuffer(); // Clear accumulation when manually adjusting rotation
             }
 
             if (g_mouse_captured) {
@@ -407,6 +435,7 @@ int main() {
 
             if (rotation_changed) {
                 renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
+				renderer->resetAccumulationBuffer(); // Clear accumulation when manually adjusting rotation
             }
 
             if (ImGui::Button("Reset Rotation")) {

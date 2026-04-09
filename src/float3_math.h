@@ -9,6 +9,10 @@
     #define FLOAT3_DEVICE
 #endif
 
+FLOAT3_DEVICE inline float3 make_float3(const float a) {
+    return make_float3(a, a, a);
+}
+
 // ------------------------------------------------------------------
 // Arithmetic Operators
 // ------------------------------------------------------------------
@@ -97,6 +101,10 @@ FLOAT3_DEVICE inline float3 clamp(const float3& v, float min_val, float max_val)
     fmin(fmax(v.y, min_val), max_val),
     fmin(fmax(v.z, min_val), max_val)
     );
+}
+
+FLOAT3_DEVICE inline float clamp(const float v, float min_val, float max_val) {
+    return fmin(fmax(v, min_val), max_val);
 }
 
 FLOAT3_DEVICE inline float3 abs(const float3& v) {

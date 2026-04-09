@@ -66,6 +66,19 @@ void OptixRenderer::loadScene(const std::string& obj_path, const std::string& mt
     uploadGeometryData();
 }
 
+void OptixRenderer::loadMap(const std::string& path) {
+    cudaTextureObject_t env_map = loadEnvmap(path);
+    
+    if (env_map == 0) {
+        DEBUG_LOG("[Env] Failed to load environment map - texture is null");
+        params.has_envmap = false;
+        return;
+    }
+	params.envmap = env_map;
+	params.has_envmap = true;
+    DEBUG_LOG("[Env] Successfully loaded environment map");
+}
+
 void OptixRenderer::uploadGeometryData() {
     // Vertices (full buffer)
     {
@@ -113,6 +126,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
     pipeline_compile_options.numAttributeValues = 2;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
+    pipeline_compile_options.pipelineLaunchParamsSizeInBytes = sizeof(Params);
 
     char log[4096];
     size_t logSize = sizeof(log);
@@ -129,7 +143,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
     if (logSize > 1)
         std::cerr << "[OptiX] Module log:\n" << log << std::endl;
 
-    DEBUG_LOG("[OptiX] Module created");
+    DEBUG_LOGF("[OptiX] Module created, params size: %d", sizeof(Params));
 
     // Create program groups
     OptixProgramGroupDesc descriptor_raygen = {};
@@ -285,7 +299,7 @@ void OptixRenderer::buildIAS() {
         &ias_handle, nullptr, 0));
 
     CUDA_CHECK(cudaFree((void*)d_ias_temp));
-    std::cout << "[IAS] Built" << std::endl;
+    DEBUG_LOG("[IAS] Built");
 }
 
 // ----------------------------------------------------------
@@ -395,6 +409,9 @@ void OptixRenderer::setupLighting() {
     params.rr_threshold = 0.95f;   // 95% chance to continue
     params.rr_decay = 0.96f;       // Reduce by 4% per bounce
 
+    params.envmap_scale = 1.0f;
+    params.envmap_exposure = 0.0f;
+
     DEBUG_LOGF("[Lighting] Setup complete %d lights", params.num_lights);
 }
 
@@ -423,7 +440,7 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 
         CUDA_CHECK(cudaDeviceSynchronize());
     }
-	DEBUG_LOGF("%d", params.current_sample);
+	//DEBUG_LOGF("%d", params.current_sample);
 }
 
 void OptixRenderer::updateInstanceTransform(const float transform[12]) {
@@ -441,6 +458,11 @@ void OptixRenderer::updateLightParametersColor(int light_idx, float3 color) {
     if (light_idx >= 0 && light_idx < params.num_lights) {
         params.lights[light_idx].color = color;
     }
+}
+
+void OptixRenderer::updateEnvmapParameters(float scale, float exposure) {
+	params.envmap_scale = scale;
+	params.envmap_exposure = exposure;
 }
 
 void OptixRenderer::resetAccumulationBuffer() {

@@ -47,6 +47,12 @@ struct Params {
     // Russian roulette parameters
     float   rr_threshold;       // Starting probability (e.g., 0.8 = 80% chance to continue)
     float   rr_decay;           // How much to reduce probability per bounce (e.g., 0.95)
+
+	// Environment map parameters
+	float envmap_scale;         // intensity multiplier
+    float envmap_exposure;
+    bool has_envmap;
+    cudaTextureObject_t envmap; // the HDR texture
 };
 
 struct RayGenData {};

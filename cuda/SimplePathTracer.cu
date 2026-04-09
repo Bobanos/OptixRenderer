@@ -125,6 +125,27 @@ __device__ float3 getInterpolatedNormal(const HitGroupDataCommon* sbt, const flo
 }
 
 // ------------------------------------------------------------------
+// Helper: sample environment map using ray direction
+// ------------------------------------------------------------------
+
+// Convert a direction to equirectangular UV
+__device__ float2 dirToEnvmapUV(float3 dir) {
+    float phi   = atan2f(dir.z, dir.x);           // [-pi, pi]
+    float theta = acosf(clamp(dir.y, -1.f, 1.f)); // [0, pi]
+    float zoom = 1.0f; // Could be a parameter to control field of view
+    return make_float2(
+        (phi   / (2.f * M_PI)) * zoom + 0.5f,  // u: [0,1]
+        theta /       M_PI                    // v: [0,1]
+    );
+}
+
+__device__ float3 sampleEnvmap(cudaTextureObject_t envmap, float3 dir) {
+    float2 uv = dirToEnvmapUV(dir);
+    float4 val = tex2D<float4>(envmap, uv.x, uv.y);
+    return make_float3(val.x, val.y, val.z);
+}
+
+// ------------------------------------------------------------------
 // Helper: get albedo - samples texture if present, else vertex color
 // ------------------------------------------------------------------
 __device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
@@ -243,6 +264,7 @@ extern "C" __global__ void __raygen__rg()
 // ------------------------------------------------------------------
 // Miss: sky gradient
 // ------------------------------------------------------------------
+/*
 extern "C" __global__ void __miss__ms()
 {
     // Sky blue gradient
@@ -254,6 +276,26 @@ extern "C" __global__ void __miss__ms()
     optixSetPayload_0(__float_as_uint(color.x));
     optixSetPayload_1(__float_as_uint(color.y));
     optixSetPayload_2(__float_as_uint(color.z));
+}
+*/
+
+extern "C" __global__ void __miss__ms() {
+    //MissData* miss = (MissData*)optixGetSbtDataPointer();
+    const float3 ray_dir = optixGetWorldRayDirection();
+    float3 Le;
+
+    if (params.has_envmap) {
+        float3 envColor = sampleEnvmap(params.envmap, ray_dir);
+        // Apply exposure: exposure = log2 scale
+        envColor = envColor * params.envmap_scale * powf(2.0f, params.envmap_exposure);
+        Le = clamp(envColor, 0.0f, 10.0f);  // Allow HDR values
+    } else {
+        float t = 0.5f * (ray_dir.y + 1.0f);
+        Le = (1.0f - t) * make_float3(1.0f, 1.0f, 1.0f) + t * make_float3(0.5f, 0.7f, 1.0f);
+    }
+    optixSetPayload_0(__float_as_uint(Le.x));
+    optixSetPayload_1(__float_as_uint(Le.y));
+    optixSetPayload_2(__float_as_uint(Le.z));
 }
 
 // ------------------------------------------------------------------

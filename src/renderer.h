@@ -8,7 +8,7 @@
 #include "optix_params.h"
 #include "obj_loader.h"
 #include "camera.h"
-#include "stb_image.h"
+
 
 #ifdef _DEBUG
     #define DEBUG_LOG(msg) std::cout << msg << std::endl
@@ -48,6 +48,7 @@ public:
     void initCUDA();
     void initOptix();
     void loadScene(const std::string& obj_path, const std::string& mtl_path);
+    void loadMap(const std::string& path);
     void buildAccelerationStructures();
     void setupShaders();
     void setupLighting();
@@ -57,6 +58,7 @@ public:
     void updateInstanceTransform(const float transform[12]);
     void updateLightParametersPos(int light_idx, float3 pos);
     void updateLightParametersColor(int light_idx, float3 color);
+	void updateEnvmapParameters(float scale, float exposure);
 
     void updateShipTransform(float rotation_x, float rotation_y, float rotation_z);
 
