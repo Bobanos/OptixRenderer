@@ -215,8 +215,7 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-        renderer->loadScene("assets/6887_allied_avenger.obj", "assets/6887_allied_avenger.mtl");
-		renderer->loadMap("assets/golden_gate_hills_2k.hdr");
+        renderer->loadScene(SceneID::ALLIED_AVENGER);
         renderer->setupShaders();
         renderer->buildAccelerationStructures();
         renderer->setupLighting();
@@ -224,22 +223,25 @@ int main() {
         // Create display buffer
         ImGuiDisplayBuffer display(width, height);
 
+        // Get initial scene data
+        SceneData initial_scene = SceneManager::getSceneConfig(SceneID::ALLIED_AVENGER);
+
         // Create camera
         CameraController camera_controller(
-            make_float3(0.0f, 5.0f, 8.0f),  // position
-            make_float3(0.0f, -4.0f, 0.0f),  // look at
-            make_float3(0.0f, 1.0f, 0.0f),  // up
-            60.0f,                           // vfov
-            (float)width / (float)height    // aspect ratio
+            initial_scene.camera_position,
+            initial_scene.camera_lookat,
+            initial_scene.camera_up,
+            initial_scene.camera_vfov,
+            (float)width / (float)height
         );
         g_camera = &camera_controller;
 
         // ----------------------------------------------------------
         // Ship transform state
         // ----------------------------------------------------------
-        float ship_rotation_x = 0.0f;
-        float ship_rotation_y = 0.0f;
-        float ship_rotation_z = 0.0f;
+        float ship_rotation_x = initial_scene.object_rotation_x;
+        float ship_rotation_y = initial_scene.object_rotation_y;
+        float ship_rotation_z = initial_scene.object_rotation_z;
         bool  auto_rotate = false;
         float rotation_speed = 1.0f;
 
@@ -439,10 +441,11 @@ int main() {
             }
 
             if (ImGui::Button("Reset Rotation")) {
-                ship_rotation_x = 0.0f;
-                ship_rotation_y = 0.0f;
-                ship_rotation_z = 0.0f;
+                ship_rotation_x = initial_scene.object_rotation_x;
+                ship_rotation_y = initial_scene.object_rotation_y;
+                ship_rotation_z = initial_scene.object_rotation_z;
                 renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
+                renderer->resetAccumulationBuffer();
             }
             ImGui::End();
 
@@ -482,6 +485,30 @@ int main() {
                 }
             }
 
+            ImGui::End();
+
+            ImGui::Begin("Scene Selection");
+
+            static SceneID selected_scene = SceneID::ALLIED_AVENGER;
+
+            if (ImGui::RadioButton("Allied Avenger", (int*)&selected_scene, (int)SceneID::ALLIED_AVENGER)) {
+                renderer->switchScene(SceneID::ALLIED_AVENGER);
+                // Update camera to new scene's camera position
+                SceneData new_scene = SceneManager::getSceneConfig(SceneID::ALLIED_AVENGER);
+                camera_controller.setPosition(new_scene.camera_position);
+                camera_controller.setLookAt(new_scene.camera_lookat);
+                renderer->resetAccumulationBuffer();
+            }
+            if (ImGui::RadioButton("Geosphere (Furnace Test)", (int*)&selected_scene, (int)SceneID::GEOSPHERE)) {
+                renderer->switchScene(SceneID::GEOSPHERE);
+                // Update camera to new scene's camera position
+                SceneData new_scene = SceneManager::getSceneConfig(SceneID::GEOSPHERE);
+                camera_controller.setPosition(new_scene.camera_position);
+                camera_controller.setLookAt(new_scene.camera_lookat);
+                renderer->resetAccumulationBuffer();
+            }
+
+            ImGui::Text("Current: %s", renderer->getCurrentSceneName().c_str());
             ImGui::End();
 
             // Render ImGui

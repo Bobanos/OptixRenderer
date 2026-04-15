@@ -8,6 +8,7 @@
 #include "optix_params.h"
 #include "obj_loader.h"
 #include "camera.h"
+#include "scene.h"
 
 
 #ifdef _DEBUG
@@ -47,7 +48,7 @@ public:
     // Initialization
     void initCUDA();
     void initOptix();
-    void loadScene(const std::string& obj_path, const std::string& mtl_path);
+    void loadScene(SceneID scene_id);
     void loadMap(const std::string& path);
     void buildAccelerationStructures();
     void setupShaders();
@@ -62,6 +63,11 @@ public:
 
     void updateShipTransform(float rotation_x, float rotation_y, float rotation_z);
 
+    // Scene switching
+    void switchScene(SceneID scene_id);
+    SceneID getCurrentSceneID() const { return current_scene_id; }
+    std::string getCurrentSceneName() const { return current_scene_data.name; }
+
     // Getters
     uchar4* getPixelBuffer() const { return params.image; }
     float3* getAccumBuffer() const { return params.accum_buffer; }
@@ -69,6 +75,7 @@ public:
     int getHeight() const { return params.height; }
     Params& getParams() { return params; }
     void getShipRotation(float& rotation_x, float& rotation_y, float& rotation_z) const;
+    SceneData getCurrentSceneData() const { return current_scene_data; }
 
     // Parameter updates
     void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
@@ -138,6 +145,10 @@ private:
     float ship_rotation_z = 0.0f;
 
     Camera last_camera = {};
+
+    // Scene management
+    SceneID current_scene_id = SceneID::ALLIED_AVENGER;
+    SceneData current_scene_data;
 
     void rebuildIAS();
 

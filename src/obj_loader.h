@@ -258,7 +258,7 @@ inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
         // Record material info for SBT
         MergedObjMesh::MaterialInfo mat_info;
         mat_info.name = mesh.material_name;
-        mat_info.color = mesh.vertices.empty() ? make_float3(0.8f, 0.8f, 0.8f)
+        mat_info.color = mesh.vertices.empty() ? make_float3(1.0f, 0.0f, 1.0f)
             : mesh.vertices[0].color;
         mat_info.ior = mesh.ior;
         mat_info.is_glass = mesh.is_glass;
@@ -292,6 +292,7 @@ inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
         const auto& m = result.materials[i];
         std::cout << "  [SBT " << i << "] '" << m.name << "': "
             << (m.is_glass ? "GLASS" : "solid")
+            << " color=(" << m.color.x << ", " << m.color.y << ", " << m.color.z << ")"
             << (m.texture_path.empty() ? "" : " tex=" + m.texture_path)
             << "\n";
     }

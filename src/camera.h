@@ -18,6 +18,9 @@ public:
     float3 getPosition() const { return position; }
     float getSpeed() const { return movement_speed; }
 
+	void setPosition(const float3& new_position) { position = new_position; updateCameraVectors(); }
+	void setLookAt(const float3& new_look_at) { look_at = new_look_at; updateCameraVectors(); }
+
 private:
     void updateCameraVectors();
 

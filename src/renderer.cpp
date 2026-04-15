@@ -3,9 +3,6 @@
 #include <vector>
 #include <cuda_gl_interop.h>
 
-#define M_PI 3.14159265f
-
-
 
 void optixLogCallback(unsigned int level, const char* tag, const char* message, void*) {
     std::cerr << "[OptiX][" << level << "][" << tag << "] "
@@ -56,14 +53,19 @@ void OptixRenderer::initOptix() {
     DEBUG_LOG("[OptiX] Context created");
 }
 
-void OptixRenderer::loadScene(const std::string& obj_path, const std::string& mtl_path) {
-    auto ship_meshes = loadObj(obj_path, mtl_path);
+void OptixRenderer::loadScene(SceneID scene_id) {
+    current_scene_data = SceneManager::getSceneConfig(scene_id);
+    current_scene_id = scene_id;
+
+    auto ship_meshes = loadObj(current_scene_data.obj_path, current_scene_data.mtl_path);
     if (ship_meshes.empty()) throw std::runtime_error("No meshes loaded from OBJ");
 
     merged_mesh = mergeObjMeshes(ship_meshes);
-    DEBUG_LOGF("[Scene] Loaded with %d materials", merged_mesh.materials.size());
+    DEBUG_LOGF("[Scene] Loaded: %s with %d materials", current_scene_data.name.c_str(), merged_mesh.materials.size());
 
     uploadGeometryData();
+
+    loadMap(current_scene_data.envmap_path);
 }
 
 void OptixRenderer::loadMap(const std::string& path) {
@@ -263,10 +265,12 @@ void OptixRenderer::buildGAS() {
 // ----------------------------------------------------------
 void OptixRenderer::buildIAS() {
     createTransformMatrix(
-        make_float3(0.0f, 1.0f, 0.0f),
-        make_float3(0.05f, 0.05f, 0.05f),
+        current_scene_data.object_position,  // Use scene position
+        current_scene_data.object_scale,     // Use scene scale
         instance.transform,
-        -M_PI / 2.0f, 0.0f, 0.0f
+        current_scene_data.object_rotation_x,
+        current_scene_data.object_rotation_y,
+        current_scene_data.object_rotation_z
     );
     instance.instanceId = 0;
     instance.sbtOffset = 0;
@@ -468,7 +472,7 @@ void OptixRenderer::updateEnvmapParameters(float scale, float exposure) {
 void OptixRenderer::resetAccumulationBuffer() {
     if (device_buffers.d_accum_buffer) {
         CUDA_CHECK(cudaMemset((void*)device_buffers.d_accum_buffer, 0, params.width * params.height * sizeof(float3)));
-		DEBUG_LOG("[Render] Accumulation buffer reset");
+		//DEBUG_LOG("[Render] Accumulation buffer reset");
     }
 	params.current_sample = 0;
 }
@@ -592,8 +596,8 @@ void OptixRenderer::updateShipTransform(float rotation_x, float rotation_y, floa
     // Update the instance transform
     float sc = 0.05f;
     createTransformMatrix(
-        make_float3(0.0f, 1.0f, 0.0f),
-        make_float3(sc, sc, sc),
+        current_scene_data.object_position,
+        current_scene_data.object_scale,
         instance.transform,
         ship_rotation_x,
         ship_rotation_y,
@@ -653,9 +657,85 @@ void OptixRenderer::updateCamera(const Camera& camera) {
     if (pos_distance > 0.001f || dir_distance > 0.001f) {
         // Camera moved - reset accumulation
         resetAccumulationBuffer();
-        DEBUG_LOG("[Camera] Moved - accumulation reset");
+        //DEBUG_LOG("[Camera] Moved - accumulation reset");
     }
 
 
     last_camera = camera;
+}
+
+void OptixRenderer::switchScene(SceneID scene_id) {
+    if (scene_id == current_scene_id) {
+        return;  // Already on this scene
+    }
+
+    // Get new scene configuration
+    current_scene_data = SceneManager::getSceneConfig(scene_id);
+    current_scene_id = scene_id;
+
+    // Clean up old geometry and textures
+    for (auto& mat_tex : material_textures) {
+        if (mat_tex.albedo_tex) {
+            CUDA_CHECK(cudaDestroyTextureObject(mat_tex.albedo_tex));
+        }
+        if (mat_tex.albedo_array) {
+            CUDA_CHECK(cudaFreeArray(mat_tex.albedo_array));
+        }
+    }
+    material_textures.clear();
+
+    if (device_buffers.d_vertices) CUDA_CHECK(cudaFree((void*)device_buffers.d_vertices));
+    if (device_buffers.d_positions) CUDA_CHECK(cudaFree((void*)device_buffers.d_positions));
+    if (device_buffers.d_indices) CUDA_CHECK(cudaFree((void*)device_buffers.d_indices));
+    if (device_buffers.d_sbt_indices) CUDA_CHECK(cudaFree((void*)device_buffers.d_sbt_indices));
+    if (device_buffers.d_gas_output) CUDA_CHECK(cudaFree((void*)device_buffers.d_gas_output));
+    if (device_buffers.d_hg) CUDA_CHECK(cudaFree((void*)device_buffers.d_hg));
+
+    // Load new scene
+    auto meshes = loadObj(current_scene_data.obj_path, current_scene_data.mtl_path);
+    merged_mesh = mergeObjMeshes(meshes);
+    uploadGeometryData();
+
+    // Rebuild acceleration structures
+    buildGAS();
+    buildIAS();
+
+    // Rebuild SBT
+    buildSBT();
+
+    // Reset ship transform to scene defaults
+    ship_rotation_x = current_scene_data.object_rotation_x;
+    ship_rotation_y = current_scene_data.object_rotation_y;
+    ship_rotation_z = current_scene_data.object_rotation_z;
+
+    updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
+
+    // Update lighting
+    params.num_lights = current_scene_data.num_lights;
+    for (int i = 0; i < current_scene_data.num_lights; ++i) {
+        params.lights[i] = current_scene_data.lights[i];
+    }
+
+    // Update envmap
+    if (!current_scene_data.envmap_path.empty()) {
+        loadMap(current_scene_data.envmap_path);
+    }
+    else {
+        params.has_envmap = false;
+    }
+
+    params.envmap_scale = current_scene_data.envmap_scale;
+    params.envmap_exposure = current_scene_data.envmap_exposure;
+
+    updateCamera({
+         current_scene_data.camera_position,
+         current_scene_data.camera_lookat,
+         current_scene_data.camera_up,
+         current_scene_data.camera_vfov
+        });
+
+    // Reset accumulation
+    resetAccumulationBuffer();
+
+    DEBUG_LOGF("[Scene] Switched to: %s", current_scene_data.name.c_str());
 }

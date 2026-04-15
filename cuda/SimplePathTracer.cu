@@ -172,8 +172,12 @@ __device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
 
     // No texture - interpolate vertex color
     return sbt->vertices[tri.x].color * b0
-         + sbt->vertices[tri.y].color * bary.x
-         + sbt->vertices[tri.z].color * bary.y;
+        + sbt->vertices[tri.y].color * bary.x
+        + sbt->vertices[tri.z].color * bary.y;
+
+    // return sbt->vertices[tri.x].color
+    //      + sbt->vertices[tri.y].color
+    //      + sbt->vertices[tri.z].color;
 }
 
 // Russian roulette termination
@@ -264,21 +268,6 @@ extern "C" __global__ void __raygen__rg()
 // ------------------------------------------------------------------
 // Miss: sky gradient
 // ------------------------------------------------------------------
-/*
-extern "C" __global__ void __miss__ms()
-{
-    // Sky blue gradient
-    const float3 ray_dir = optixGetWorldRayDirection();
-    float t = 0.5f * (ray_dir.y + 1.0f);
-    float3 color = (1.0f - t) * make_float3(1.0f, 1.0f, 1.0f) + 
-                   t * make_float3(0.5f, 0.7f, 1.0f);
-
-    optixSetPayload_0(__float_as_uint(color.x));
-    optixSetPayload_1(__float_as_uint(color.y));
-    optixSetPayload_2(__float_as_uint(color.z));
-}
-*/
-
 extern "C" __global__ void __miss__ms() {
     //MissData* miss = (MissData*)optixGetSbtDataPointer();
     const float3 ray_dir = optixGetWorldRayDirection();
@@ -290,8 +279,9 @@ extern "C" __global__ void __miss__ms() {
         envColor = envColor * params.envmap_scale * powf(2.0f, params.envmap_exposure);
         Le = clamp(envColor, 0.0f, 10.0f);  // Allow HDR values
     } else {
-        float t = 0.5f * (ray_dir.y + 1.0f);
-        Le = (1.0f - t) * make_float3(1.0f, 1.0f, 1.0f) + t * make_float3(0.5f, 0.7f, 1.0f);
+        //float t = 0.5f * (ray_dir.y + 1.0f);
+        //Le = (1.0f - t) * make_float3(1.0f, 1.0f, 1.0f) + t * make_float3(0.5f, 0.7f, 1.0f);
+        Le = make_float3(0.8f, 0.8f, 0.8f); // grey
     }
     optixSetPayload_0(__float_as_uint(Le.x));
     optixSetPayload_1(__float_as_uint(Le.y));
@@ -310,8 +300,10 @@ extern "C" __global__ void __closesthit__ch()
 
     const HitGroupDataLambert* sbt = (HitGroupDataLambert*)optixGetSbtDataPointer();
 
-    float3 world_normal = getInterpolatedNormal(sbt, ray_direction);
+    //float3 world_normal = getInterpolatedNormal(sbt, ray_direction);
+    float3 world_normal = getGeometricNormal(sbt, ray_direction);
     float3 base_color   = getAlbedo(sbt);
+    //base_color = make_float3(0.5f, 0.5f, 0.5f);
 
     if (length_squared(base_color) < 0.001f)
         base_color = make_float3(1.0f, 0.0f, 1.0f);
@@ -361,14 +353,15 @@ extern "C" __global__ void __closesthit__ch()
         direct_color = direct_color + light.color * ndotl * atten * shadow;
     }
 
-    float3 ambient = make_float3(0.02f, 0.02f, 0.02f);
+    float3 ambient = make_float3(0.f, 0.f, 0.f);
     direct_color = direct_color + ambient;
 
     // Russian roulette path termination
     float rr_prob = russian_roulette_probability(depth, params.rr_threshold, params.rr_decay);
     float rr_random = random_float(seed);
-    
+    //float rr_prob = 1.0f ;
     if (rr_random < rr_prob && depth < params.max_bounce_depth) {
+    //if (depth < params.max_bounce_depth) {
         // Continue path with weighted contribution to account for probability
         float3 bounce_dir = random_hemisphere_direction(world_normal, seed);
 
@@ -393,7 +386,7 @@ extern "C" __global__ void __closesthit__ch()
         );
 
         // Divide by probability to account for Russian roulette
-        float3 final_color = direct_color * base_color + base_color * indirect_color / rr_prob;
+        float3 final_color = (direct_color * base_color + base_color * indirect_color / rr_prob) ;
         
         optixSetPayload_0(__float_as_uint(final_color.x));
         optixSetPayload_1(__float_as_uint(final_color.y));
