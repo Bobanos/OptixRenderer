@@ -50,21 +50,33 @@ __device__ float3 random_hemisphere_direction(const float3& normal, unsigned int
     );
 }
 
+// Russian roulette termination based on path throughput
+__device__ float russian_roulette_probability(float3 throughput) {
+    // Probability of continuing the path based on luminance
+    // Higher throughput = higher chance to continue
+    float luminance = 0.299f * throughput.x + 0.587f * throughput.y + 0.114f * throughput.z;
+    luminance = fminf(luminance, 0.95f);
+    
+    // Probability to continue (will divide by this later for unbiased estimation)
+    // We clamp to avoid division by very small numbers
+    return fminf(1.0f, luminance);
+}
+
 // ------------------------------------------------------------------
 // Helper: read per-vertex color from SBT data using barycentrics
 // ------------------------------------------------------------------
-__device__ float3 getVertexColor(const HitGroupDataCommon * sbt)
-{
-    const int   prim_idx = optixGetPrimitiveIndex();
-    const uint3 tri      = sbt->indices[prim_idx];
+// __device__ float3 getVertexColor(const HitGroupDataCommon * sbt)
+// {
+//     const int   prim_idx = optixGetPrimitiveIndex();
+//     const uint3 tri      = sbt->indices[prim_idx];
 
-    const float2 bary = optixGetTriangleBarycentrics();
-    const float  b0   = 1.0f - bary.x - bary.y;
+//     const float2 bary = optixGetTriangleBarycentrics();
+//     const float  b0   = 1.0f - bary.x - bary.y;
 
-    return sbt->vertices[tri.x].color * b0
-         + sbt->vertices[tri.y].color * bary.x
-         + sbt->vertices[tri.z].color * bary.y;
-}
+//     return sbt->vertices[tri.x].color * b0
+//          + sbt->vertices[tri.y].color * bary.x
+//          + sbt->vertices[tri.z].color * bary.y;
+// }
 
 // ------------------------------------------------------------------
 // Helper: compute world-space normal for the hit triangle
@@ -180,15 +192,6 @@ __device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
     //      + sbt->vertices[tri.z].color;
 }
 
-// Russian roulette termination
-__device__ float russian_roulette_probability(unsigned int depth, float threshold, float decay) {
-    // Probability of continuing the path
-    // Decreases with depth to naturally terminate paths
-    float prob = threshold * powf(decay, (float)depth);
-    prob = fmaxf(prob, 0.05f);  // Clamp minimum probability to avoid division issues
-    return prob;
-}
-
 // ------------------------------------------------------------------
 // Ray generation
 // ------------------------------------------------------------------
@@ -224,21 +227,25 @@ extern "C" __global__ void __raygen__rg()
     );
 
     // Trace ray - pass seed in payload slot 3
-    unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0;
-    optixTrace(
-        params.traversable,
-        ray_origin,
-        ray_direction,
-        0.001f,
-        1e16f,
+    unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0, 
+    p4 = __float_as_uint(1.0f), 
+    p5 = __float_as_uint(1.0f), 
+    p6 = __float_as_uint(1.0f); // 7 payload slots, 0-2 color, 3 depth and 4-6 throughput
+
+    optixTraverse(
+        params.traversable, 
+        ray_origin, 
+        ray_direction, 
+        0.001f, 
+        1e16f, 
         0.0f,
-        OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_NONE,
-        0,
-        1,
-        0,
-        p0, p1, p2, p3
+        OptixVisibilityMask(255), 
+        OPTIX_RAY_FLAG_NONE, 
+        0, 1, 0,
+        p0, p1, p2, p3, p4, p5, p6
     );
+    optixReorder();
+    optixInvoke(p0, p1, p2, p3, p4, p5, p6);
 
     // Unpack color from payload
     float r = __uint_as_float(p0);
@@ -252,8 +259,10 @@ extern "C" __global__ void __raygen__rg()
         params.accum_buffer[i] = sample_color;
     } else {
         // Weighted average: older samples have less weight as we accumulate
-        float weight = 1.0f / (float)(params.current_sample);
-        params.accum_buffer[i] = params.accum_buffer[i] * (1.0f - weight) + sample_color * weight;
+        // float weight = 1.0f / (float)(params.current_sample);
+        // params.accum_buffer[i] = params.accum_buffer[i] * (1.0f - weight) + sample_color * weight;
+        float N = (float)params.current_sample;
+        params.accum_buffer[i] = (params.accum_buffer[i] * (N - 1.0f) + sample_color) / N;
     }
 
     // Convert to uchar4 for display
@@ -305,14 +314,15 @@ extern "C" __global__ void __closesthit__ch()
     float3 base_color   = getAlbedo(sbt);
     //base_color = make_float3(0.5f, 0.5f, 0.5f);
 
-    if (length_squared(base_color) < 0.001f)
-        base_color = make_float3(1.0f, 0.0f, 1.0f);
+    //if (length_squared(base_color) < 0.001f)
+        //base_color = make_float3(1.0f, 0.0f, 1.0f);
+
 
     unsigned int depth = optixGetPayload_3();
+    float3 throughput_luminance = make_float3(__uint_as_float(optixGetPayload_4()), __uint_as_float(optixGetPayload_5()), __uint_as_float(optixGetPayload_6()));
     
     // Initialize seed for this bounce
-    unsigned int seed = params.random_seed + (depth * 12345) + 
-                        __float_as_uint(hit_point.x) ^ __float_as_uint(hit_point.y);
+    unsigned int seed = params.random_seed + (depth * 12345) + __float_as_uint(hit_point.x) ^ __float_as_uint(hit_point.y);
 
     // Direct lighting
     float3 direct_color = make_float3(0.0f, 0.0f, 0.0f);
@@ -334,8 +344,7 @@ extern "C" __global__ void __closesthit__ch()
             atten = 1.0f;
         }
 
-        unsigned int shadow_hit = 0;
-        optixTrace(
+        optixTraverse(
             params.traversable,
             hit_point + world_normal * 0.001f,
             light_dir,
@@ -343,12 +352,11 @@ extern "C" __global__ void __closesthit__ch()
             distance_to_light - 0.001f,
             0.0f,
             OptixVisibilityMask(255),
-            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
-            0, 1, 0,
-            shadow_hit
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT,
+            0, 1, 0
         );
 
-        float shadow  = shadow_hit ? 1.0f : 0.0f;
+        float shadow  = optixHitObjectIsHit() ? 0.0f : 1.0f;
         float ndotl   = fmaxf(0.0f, dot(world_normal, light_dir));
         direct_color = direct_color + light.color * ndotl * atten * shadow;
     }
@@ -356,8 +364,13 @@ extern "C" __global__ void __closesthit__ch()
     float3 ambient = make_float3(0.f, 0.f, 0.f);
     direct_color = direct_color + ambient;
 
+    // Calculate path throughput (accumulated contribution so far)
+    // This is passed in through the payload - we'll track it from raygen
+    float3 new_throughput = throughput_luminance * base_color;
+    float new_throughput_luminance = 0.299f * new_throughput.x + 0.587f * new_throughput.y + 0.114f * new_throughput.z;
+
     // Russian roulette path termination
-    float rr_prob = russian_roulette_probability(depth, params.rr_threshold, params.rr_decay);
+    float rr_prob = russian_roulette_probability(new_throughput);  // Min threshold of 0.05
     float rr_random = random_float(seed);
     //float rr_prob = 1.0f ;
     if (rr_random < rr_prob && depth < params.max_bounce_depth) {
@@ -365,7 +378,10 @@ extern "C" __global__ void __closesthit__ch()
         // Continue path with weighted contribution to account for probability
         float3 bounce_dir = random_hemisphere_direction(world_normal, seed);
 
-        unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = depth + 1;
+        unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = depth + 1, 
+        p4 = __float_as_uint(new_throughput_luminance), 
+        p5 = __float_as_uint(new_throughput_luminance), 
+        p6 = __float_as_uint(new_throughput_luminance);
         optixTrace(
             params.traversable,
             hit_point + world_normal * 0.001f,
@@ -376,7 +392,7 @@ extern "C" __global__ void __closesthit__ch()
             OptixVisibilityMask(255),
             OPTIX_RAY_FLAG_NONE,
             0, 1, 0,
-            p0, p1, p2, p3
+            p0, p1, p2, p3, p4, p5, p6
         );
 
         float3 indirect_color = make_float3(
@@ -386,7 +402,8 @@ extern "C" __global__ void __closesthit__ch()
         );
 
         // Divide by probability to account for Russian roulette
-        float3 final_color = (direct_color * base_color + base_color * indirect_color / rr_prob) ;
+        //float3 final_color = (direct_color * base_color + base_color * indirect_color / rr_prob) ;
+        float3 final_color = (direct_color * base_color ) + (base_color * indirect_color / rr_prob);
         
         optixSetPayload_0(__float_as_uint(final_color.x));
         optixSetPayload_1(__float_as_uint(final_color.y));

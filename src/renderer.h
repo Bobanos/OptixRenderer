@@ -80,8 +80,6 @@ public:
     // Parameter updates
     void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
     void setSamplesPerPixel(int spp) { params.samples_per_pixel = spp; }
-    void setRussianRouletteThreshold(float threshold) { params.rr_threshold = threshold; }
-    void setRussianRouletteDecay(float decay) { params.rr_decay = decay; }
     void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
     void setShipRotation(float rotation_x, float rotation_y, float rotation_z);
 

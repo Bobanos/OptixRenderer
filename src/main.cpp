@@ -253,9 +253,6 @@ int main() {
         float lastFrame = 0.0f;
 
         int spp_input = renderer->getParams().samples_per_pixel;
-        float rr_threshold = renderer->getParams().rr_threshold;
-        float rr_decay = renderer->getParams().rr_decay;
-
 
         // ----------------------------------------------------------
         // Render Loop
@@ -336,6 +333,17 @@ int main() {
             ImGui::BulletText("Q/E: Down/Up");
             ImGui::BulletText("Mouse: Look around");
             ImGui::BulletText("Scroll: Adjust speed");
+            ImGui::Separator();
+            if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
+                spp_input = fmaxf(1, spp_input);
+                renderer->setSamplesPerPixel(spp_input);
+                renderer->resetAccumulationBuffer();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Number of samples to accumulate per frame.\nLower = faster but noisier.\nHigher = slower but cleaner.");
+            }
             ImGui::End();
 
             // Light control
@@ -447,44 +455,6 @@ int main() {
                 renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
                 renderer->resetAccumulationBuffer();
             }
-            ImGui::End();
-
-            ImGui::Begin("Path Tracer Settings");
-            // Samples per 
-            if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
-                spp_input = fmaxf(1, spp_input);
-                renderer->setSamplesPerPixel(spp_input);
-                renderer->resetAccumulationBuffer();
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                ImGui::SetTooltip("Number of samples to accumulate per frame.\nLower = faster but noisier.\nHigher = slower but cleaner.");
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Russian Roulette");
-
-            // RR Threshold slider
-            if (ImGui::SliderFloat("RR Threshold##threshold", &rr_threshold, 0.5f, 1.0f, "%.3f")) {
-                renderer->setRussianRouletteThreshold(rr_threshold);
-                ImGui::SameLine();
-                ImGui::TextDisabled("(?)");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("Initial probability of continuing path (higher = more bounces)");
-                }
-            }
-
-            // RR Decay slider
-            if (ImGui::SliderFloat("RR Decay##decay", &rr_decay, 0.85f, 0.99f, "%.3f")) {
-                renderer->setRussianRouletteDecay(rr_decay);
-                ImGui::SameLine();
-                ImGui::TextDisabled("(?)");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("Rate of probability decrease per bounce (higher = longer paths)");
-                }
-            }
-
             ImGui::End();
 
             ImGui::Begin("Scene Selection");

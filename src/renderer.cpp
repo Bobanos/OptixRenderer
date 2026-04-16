@@ -124,7 +124,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
 
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
-    pipeline_compile_options.numPayloadValues = 4;
+    pipeline_compile_options.numPayloadValues = 7;
     pipeline_compile_options.numAttributeValues = 2;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
@@ -409,9 +409,6 @@ void OptixRenderer::setupLighting() {
     params.samples_per_pixel = 2;  // Progressive sampling
     params.current_sample = 0;
     params.random_seed = 1415;
-
-    params.rr_threshold = 0.95f;   // 95% chance to continue
-    params.rr_decay = 0.96f;       // Reduce by 4% per bounce
 
     params.envmap_scale = 1.0f;
     params.envmap_exposure = 0.0f;
