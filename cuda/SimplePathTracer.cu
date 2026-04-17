@@ -63,22 +63,6 @@ __device__ float russian_roulette_probability(float3 throughput) {
 }
 
 // ------------------------------------------------------------------
-// Helper: read per-vertex color from SBT data using barycentrics
-// ------------------------------------------------------------------
-// __device__ float3 getVertexColor(const HitGroupDataCommon * sbt)
-// {
-//     const int   prim_idx = optixGetPrimitiveIndex();
-//     const uint3 tri      = sbt->indices[prim_idx];
-
-//     const float2 bary = optixGetTriangleBarycentrics();
-//     const float  b0   = 1.0f - bary.x - bary.y;
-
-//     return sbt->vertices[tri.x].color * b0
-//          + sbt->vertices[tri.y].color * bary.x
-//          + sbt->vertices[tri.z].color * bary.y;
-// }
-
-// ------------------------------------------------------------------
 // Helper: compute world-space normal for the hit triangle
 // ------------------------------------------------------------------
 __device__ float3 getGeometricNormal(const HitGroupDataCommon* sbt, const float3& ray_dir)
@@ -186,10 +170,6 @@ __device__ float3 getAlbedo(const HitGroupDataLambert* sbt)
     return sbt->vertices[tri.x].color * b0
         + sbt->vertices[tri.y].color * bary.x
         + sbt->vertices[tri.z].color * bary.y;
-
-    // return sbt->vertices[tri.x].color
-    //      + sbt->vertices[tri.y].color
-    //      + sbt->vertices[tri.z].color;
 }
 
 // ------------------------------------------------------------------
@@ -204,67 +184,72 @@ extern "C" __global__ void __raygen__rg()
 
     const int i = idx.y * params.width + idx.x;
 
-    // Initialize random seed per pixel (different for each sample)
-    unsigned int seed = params.random_seed + (idx.x * 73856093 ^ idx.y * 19349663 ^ params.current_sample * 83492791);
+    // Initialize accumulation for this pixel
+    float3 accumulated_color = make_float3(0.0f, 0.0f, 0.0f);
 
-    // Calculate normalized pixel coordinates with jitter for antialiasing
-    float jitter_x = random_float(seed);
-    float jitter_y = random_float(seed);
-    
-    float u = (float)idx.x + jitter_x / (float)(params.width - 1);
-    float v = (float)idx.y + jitter_y / (float)(params.height - 1);
-    
-    u = u / (float)(params.width);
-    v = v / (float)(params.height);
+    // Loop over samples per pixel
+    for (int sample = 0; sample < params.samples_per_pixel; ++sample) {
+        // Initialize random seed per sample
+        unsigned int seed = params.random_seed + (idx.x * 73856093 ^ idx.y * 19349663 ^ sample * 83492791);
 
-    // Generate ray from camera
-    float3 ray_origin = params.camera.origin;
-    float3 ray_direction = normalize(
-        params.camera.lower_left_corner +
-        u * params.camera.horizontal +
-        v * params.camera.vertical -
-        params.camera.origin
-    );
+        // Calculate normalized pixel coordinates with jitter for antialiasing
+        float jitter_x = random_float(seed);
+        float jitter_y = random_float(seed);
+        
+        float u = (float)idx.x + jitter_x / (float)(params.width - 1);
+        float v = (float)idx.y + jitter_y / (float)(params.height - 1);
+        
+        u = u / (float)(params.width);
+        v = v / (float)(params.height);
 
-    // Trace ray - pass seed in payload slot 3
-    unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0, 
-    p4 = __float_as_uint(1.0f), 
-    p5 = __float_as_uint(1.0f), 
-    p6 = __float_as_uint(1.0f); // 7 payload slots, 0-2 color, 3 depth and 4-6 throughput
+        // Generate ray from camera
+        float3 ray_origin = params.camera.origin;
+        float3 ray_direction = normalize(
+            params.camera.lower_left_corner +
+            u * params.camera.horizontal +
+            v * params.camera.vertical -
+            params.camera.origin
+        );
 
-    optixTraverse(
-        params.traversable, 
-        ray_origin, 
-        ray_direction, 
-        0.001f, 
-        1e16f, 
-        0.0f,
-        OptixVisibilityMask(255), 
-        OPTIX_RAY_FLAG_NONE, 
-        0, 1, 0,
-        p0, p1, p2, p3, p4, p5, p6
-    );
-    optixReorder();
-    optixInvoke(p0, p1, p2, p3, p4, p5, p6);
+        // Trace ray
+        unsigned int p0 = 0, p1 = 0, p2 = 0, p3 = 0, 
+        p4 = __float_as_uint(1.0f), 
+        p5 = __float_as_uint(1.0f), 
+        p6 = __float_as_uint(1.0f);
 
-    // Unpack color from payload
-    float r = __uint_as_float(p0);
-    float g = __uint_as_float(p1);
-    float b = __uint_as_float(p2);
-    
-    float3 sample_color = make_float3(r, g, b);
+        optixTraverse(
+            params.traversable, 
+            ray_origin, 
+            ray_direction, 
+            0.001f, 
+            1e16f, 
+            0.0f,
+            OptixVisibilityMask(255), 
+            OPTIX_RAY_FLAG_NONE, 
+            0, 1, 0,
+            p0, p1, p2, p3, p4, p5, p6
+        );
+        optixReorder();
+        optixInvoke(p0, p1, p2, p3, p4, p5, p6);
 
-    // Accumulate into buffer
-    if (params.current_sample == 0) {
-        params.accum_buffer[i] = sample_color;
-    } else {
-        // Weighted average: older samples have less weight as we accumulate
-        // float weight = 1.0f / (float)(params.current_sample);
-        // params.accum_buffer[i] = params.accum_buffer[i] * (1.0f - weight) + sample_color * weight;
-        float N = (float)params.current_sample;
-        params.accum_buffer[i] = (params.accum_buffer[i] * (N - 1.0f) + sample_color) / N;
+        // Unpack color from this sample
+        float r = __uint_as_float(p0);
+        float g = __uint_as_float(p1);
+        float b = __uint_as_float(p2);
+        
+        accumulated_color = accumulated_color + make_float3(r, g, b);
     }
-
+    
+    // Average the accumulated samples
+    accumulated_color = accumulated_color / (float)params.samples_per_pixel;
+    // Update frame accumulation buffer
+    if (params.current_sample == 0) {
+        params.accum_buffer[i] = accumulated_color;
+    } else {
+        float N = (float)(params.current_sample * params.samples_per_pixel);
+        params.accum_buffer[i] = (params.accum_buffer[i] * (N - (float)params.samples_per_pixel) + accumulated_color * (float)params.samples_per_pixel) / N;
+    }
+  
     // Convert to uchar4 for display
     float3 final_color = clamp(params.accum_buffer[i], 0.0f, 1.0f);
     params.image[i] = make_uchar4(
@@ -274,6 +259,7 @@ extern "C" __global__ void __raygen__rg()
         255
     );
 }
+
 // ------------------------------------------------------------------
 // Miss: sky gradient
 // ------------------------------------------------------------------
@@ -361,8 +347,8 @@ extern "C" __global__ void __closesthit__ch()
         direct_color = direct_color + light.color * ndotl * atten * shadow;
     }
 
-    float3 ambient = make_float3(0.f, 0.f, 0.f);
-    direct_color = direct_color + ambient;
+    // float3 ambient = make_float3(0.f, 0.f, 0.f);
+    // direct_color = direct_color + ambient;
 
     // Calculate path throughput (accumulated contribution so far)
     // This is passed in through the payload - we'll track it from raygen

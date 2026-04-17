@@ -429,19 +429,17 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 
     params.camera = camera;
     params.traversable = ias_handle;
+    params.samples_per_pixel = samples_per_pixel;
+    params.random_seed = params.random_seed * 1103515245 + 12345;
 
-    for (int i = 0; i < samples_per_pixel; ++i) {
-        params.current_sample++;
-        params.random_seed = params.random_seed * 1103515245 + 12345;
+    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
-        CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
+    OPTIX_CHECK(optixLaunch(pipeline, 0, device_buffers.d_params, sizeof(Params), &sbt,
+        params.width, params.height, 1));
 
-        OPTIX_CHECK(optixLaunch(pipeline, 0, device_buffers.d_params, sizeof(Params), &sbt,
-            params.width, params.height, 1));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
-	//DEBUG_LOGF("%d", params.current_sample);
+	params.current_sample++;
 }
 
 void OptixRenderer::updateInstanceTransform(const float transform[12]) {
