@@ -9,7 +9,8 @@
 
 enum class SceneID {
     ALLIED_AVENGER = 0,
-    GEOSPHERE = 1
+    GEOSPHERE = 1,
+    SPITFIRE = 2
 };
 
 struct SceneData {
@@ -46,6 +47,8 @@ public:
             return getAliedAvengerScene();
         case SceneID::GEOSPHERE:
             return getGeosphereScene();
+        case SceneID::SPITFIRE:
+            return getSpitfireScene();
         default:
             return getAliedAvengerScene();
         }
@@ -97,10 +100,10 @@ private:
         SceneData scene;
         scene.id = SceneID::GEOSPHERE;
         scene.name = "Geosphere (Furnace Test)";
-        scene.obj_path = "assets/geosphere_lambert/geosphere_lambert.obj";
-        scene.mtl_path = "assets/geosphere_lambert/geosphere_lambert.mtl";
-        //scene.obj_path = "assets/geosphere_glass/geosphere.obj";
-        //scene.mtl_path = "assets/geosphere_glass/geosphere_glass.mtl";
+        //scene.obj_path = "assets/geosphere_lambert/geosphere_lambert.obj";
+        //scene.mtl_path = "assets/geosphere_lambert/geosphere_lambert.mtl";
+        scene.obj_path = "assets/geosphere_glass/geosphere.obj";
+        scene.mtl_path = "assets/geosphere_glass/geosphere_glass.mtl";
         scene.envmap_path = ""; // No env map for furnace test
 
         // Centered view
@@ -120,6 +123,32 @@ private:
         scene.lights[0].type = 1;  // Directional
         scene.lights[0].position_or_direction = normalize(make_float3(0.0f, 1.0f, 0.0f));
         scene.lights[0].color = make_float3(1.0f, 1.0f, 1.0f);
+
+        scene.num_lights = 0;
+        scene.envmap_scale = 1.0f;
+        scene.envmap_exposure = 0.0f;
+
+        return scene;
+    }
+
+    static SceneData getSpitfireScene() {
+        SceneData scene;
+        scene.id = SceneID::SPITFIRE;
+        scene.name = "Spitfire";
+        scene.obj_path = "assets/spitfire/spitfire.obj";
+        scene.mtl_path = "assets/spitfire/spitfire.mtl";
+        scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
+
+        scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
+        scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+        scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
+        scene.camera_vfov = 60.0f;
+
+        scene.object_scale = make_float3(0.05f, 0.05f, 0.05f);
+        scene.object_position = make_float3(0.0f, 1.0f, 0.0f);
+        scene.object_rotation_x = -M_PI / 2.0f;
+        scene.object_rotation_y = -M_PI / 3.0f;
+        scene.object_rotation_z = 0.0f;
 
         scene.num_lights = 0;
         scene.envmap_scale = 1.0f;

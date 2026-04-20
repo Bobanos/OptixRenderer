@@ -12,6 +12,11 @@
 #include <iostream>
 #include <cassert>
 
+#include <chrono>
+//#include <sstream>
+//#include <iomanip>
+#include <filesystem>
+
 #include "renderer.h"
 #include "optix_params.h"
 #include "camera.h"
@@ -51,6 +56,57 @@ OptixRenderer* renderer = nullptr;
 // Camera instance (global for mouse callback)
 CameraController* g_camera = nullptr;
 bool g_mouse_captured = false;
+
+// ------------------------------------------------------------------
+// Screenshots and output management
+// ------------------------------------------------------------------
+// Helper function to save screenshot as PPM (simple, no external deps)
+void saveScreenshot(const uchar4* pixel_buffer, int width, int height,
+    const std::string& filename)
+{
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "[Screenshot] Failed to open: " << filename << std::endl;
+        return;
+    }
+
+    // PPM header
+    file << "P6\n";
+    file << width << " " << height << "\n";
+    file << "255\n";
+
+    // Write RGB data (skip alpha channel)
+    for (int y = height - 1; y >= 0; --y) {
+        for (int x = 0; x < width; ++x) {
+            int idx = y * width + x;
+            file.put(pixel_buffer[idx].x);
+            file.put(pixel_buffer[idx].y);
+            file.put(pixel_buffer[idx].z);
+        }
+    }
+
+    file.close();
+    std::cout << "[Screenshot] Saved to: " << filename << std::endl;
+}
+
+// Generate timestamped filename with scene name
+std::string generateScreenshotFilename(const std::string& scene_name)
+{
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+
+    std::tm* timeinfo = std::localtime(&time);
+    std::stringstream ss;
+    ss << "screenshots/"
+        << scene_name << "_"
+        << std::put_time(timeinfo, "%Y%m%d_%H%M%S")
+        << "_" << std::setfill('0') << std::setw(3) << ms.count()
+        << ".ppm";
+
+    return ss.str();
+}
 
 // ------------------------------------------------------------------
 // Callbacks and input processing
@@ -334,6 +390,34 @@ int main() {
             ImGui::BulletText("Mouse: Look around");
             ImGui::BulletText("Scroll: Adjust speed");
             ImGui::Separator();
+
+            // Screenshot button
+            if (ImGui::Button("Save Screenshot", ImVec2(-1, 0))) {
+                // Ensure screenshots directory exists
+                std::filesystem::create_directories("screenshots");
+
+                // Get current scene name for filename
+                std::string scene_name = renderer->getCurrentSceneName();
+                // Replace spaces with underscores
+                std::replace(scene_name.begin(), scene_name.end(), ' ', '_');
+
+                // Generate timestamped filename
+                std::string filename = generateScreenshotFilename(scene_name);
+
+                // Copy pixel data from GPU to CPU
+                std::vector<uchar4> pixel_data(width * height);
+                CUDA_CHECK(cudaMemcpy(pixel_data.data(), renderer->getPixelBuffer(),
+                    width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
+
+                // Save screenshot
+                saveScreenshot(pixel_data.data(), width, height, filename);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Saves current viewport to screenshots/ folder as PPM");
+            }
+            ImGui::Separator();
             if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
                 spp_input = fmaxf(1, spp_input);
                 renderer->setSamplesPerPixel(spp_input);
@@ -356,8 +440,8 @@ int main() {
             static float light2_dir[3] = { 0.0f, -1.0f, -0.2f };
             static float light2_col[3] = { 0.5f, 0.5f, 0.5f };
 
-			static float env_map_scale = renderer->getParams().envmap_scale;
-			static float env_map_expo = renderer->getParams().envmap_exposure;
+			static float env_map_scale = renderer->getParams().envmap.scale;
+			static float env_map_expo = renderer->getParams().envmap.exposure;
             
 
             if (g_mouse_captured) {
@@ -473,6 +557,14 @@ int main() {
                 renderer->switchScene(SceneID::GEOSPHERE);
                 // Update camera to new scene's camera position
                 SceneData new_scene = SceneManager::getSceneConfig(SceneID::GEOSPHERE);
+                camera_controller.setPosition(new_scene.camera_position);
+                camera_controller.setLookAt(new_scene.camera_lookat);
+                renderer->resetAccumulationBuffer();
+            }            
+            if (ImGui::RadioButton("Spitfire", (int*)&selected_scene, (int)SceneID::SPITFIRE)) {
+                renderer->switchScene(SceneID::SPITFIRE);
+                // Update camera to new scene's camera position
+                SceneData new_scene = SceneManager::getSceneConfig(SceneID::SPITFIRE);
                 camera_controller.setPosition(new_scene.camera_position);
                 camera_controller.setLookAt(new_scene.camera_lookat);
                 renderer->resetAccumulationBuffer();

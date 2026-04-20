@@ -148,6 +148,9 @@ private:
     SceneID current_scene_id = SceneID::ALLIED_AVENGER;
     SceneData current_scene_data;
 
+    cudaArray_t envmap_cdf_marginal_array = nullptr;
+    cudaArray_t envmap_cdf_conditional_array = nullptr;
+
     void rebuildIAS();
 
     // Helper methods

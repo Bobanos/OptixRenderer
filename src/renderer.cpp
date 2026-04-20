@@ -69,16 +69,68 @@ void OptixRenderer::loadScene(SceneID scene_id) {
 }
 
 void OptixRenderer::loadMap(const std::string& path) {
-    cudaTextureObject_t env_map = loadEnvmap(path);
-    
-    if (env_map == 0) {
-        DEBUG_LOG("[Env] Failed to load environment map - texture is null");
-        params.has_envmap = false;
+    if (path.empty()) {
+        params.envmap.has_envmap = false;
         return;
     }
-	params.envmap = env_map;
-	params.has_envmap = true;
-    DEBUG_LOG("[Env] Successfully loaded environment map");
+
+    int width, height, channels;
+    float* data = stbi_loadf(path.c_str(), &width, &height, &channels, 4);  // Force RGBA
+    if (!data) {
+        std::cerr << "[Env] Failed to load: " << path << " — " << stbi_failure_reason() << "\n";
+        params.envmap.has_envmap = false;
+        return;
+    }
+
+    std::cout << "[Env] Loaded " << path << " (" << width << "x" << height << ")\n";
+
+    // --- Upload envmap texture ---
+    {
+        cudaArray_t env_array;
+        cudaChannelFormatDesc fmt = cudaCreateChannelDesc<float4>();
+        CUDA_CHECK(cudaMallocArray(&env_array, &fmt, width, height));
+        CUDA_CHECK(cudaMemcpy2DToArray(
+            env_array, 0, 0,
+            data,
+            width * 4 * sizeof(float),
+            width * 4 * sizeof(float),
+            height,
+            cudaMemcpyHostToDevice));
+
+        cudaResourceDesc res_desc = {};
+        res_desc.resType = cudaResourceTypeArray;
+        res_desc.res.array.array = env_array;
+
+        cudaTextureDesc tex_desc = {};
+        tex_desc.addressMode[0] = cudaAddressModeWrap;
+        tex_desc.addressMode[1] = cudaAddressModeClamp;
+        tex_desc.filterMode = cudaFilterModeLinear;
+        tex_desc.readMode = cudaReadModeElementType;
+        tex_desc.normalizedCoords = 1;
+
+        CUDA_CHECK(cudaCreateTextureObject(&params.envmap.texture, &res_desc, &tex_desc, nullptr));
+    }
+
+    // --- Compute and upload CDF textures ---
+    {
+        std::vector<float> marginal_cdf, conditional_cdf;
+        computeEnvmapCDF(data, width, height, marginal_cdf, conditional_cdf);
+        uploadEnvmapCDFTextures(
+            marginal_cdf, conditional_cdf,
+            width, height,
+            params.envmap.cdf_marginal_v,
+            params.envmap.cdf_conditional_u,
+            envmap_cdf_marginal_array,
+            envmap_cdf_conditional_array);
+
+        params.envmap.width = width;
+        params.envmap.height = height;
+    }
+
+    stbi_image_free(data);
+
+    params.envmap.has_envmap = true;
+    DEBUG_LOG("[Env] Successfully loaded environment map with CDF");
 }
 
 void OptixRenderer::uploadGeometryData() {
@@ -330,6 +382,10 @@ void OptixRenderer::buildSBT() {
             rec.data.indices = (uint3*)device_buffers.d_indices;
             rec.data.refraction_index = mat.ior;
 
+            for (auto& v : merged_mesh.vertices) {
+                v.color = mat.color;  // Set vertex color to material color
+            }
+
             hit_records.resize(hit_records.size() + max_stride);
             std::memcpy(hit_records.data() + mat_idx * max_stride, &rec, sizeof(HitGroupRecordGlass));
         }
@@ -360,6 +416,11 @@ void OptixRenderer::buildSBT() {
 
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_hg, hit_records.size()));
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_hg, hit_records.data(), hit_records.size(), cudaMemcpyHostToDevice));
+
+    // Re-upload vertices with corrected colors
+    size_t cv = merged_mesh.vertices.size() * sizeof(ColoredVertex);
+    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_vertices, merged_mesh.vertices.data(), cv, cudaMemcpyHostToDevice));
+
 
     RayGenRecord raygen_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(raygen_program_group, &raygen_record));
@@ -410,8 +471,8 @@ void OptixRenderer::setupLighting() {
     params.current_sample = 0;
     params.random_seed = 1415;
 
-    params.envmap_scale = 1.0f;
-    params.envmap_exposure = 0.0f;
+    params.envmap.scale = 1.0f;
+    params.envmap.exposure = 0.0f;
 
     DEBUG_LOGF("[Lighting] Setup complete %d lights", params.num_lights);
 }
@@ -460,8 +521,8 @@ void OptixRenderer::updateLightParametersColor(int light_idx, float3 color) {
 }
 
 void OptixRenderer::updateEnvmapParameters(float scale, float exposure) {
-	params.envmap_scale = scale;
-	params.envmap_exposure = exposure;
+	params.envmap.scale = scale;
+	params.envmap.exposure = exposure;
 }
 
 void OptixRenderer::resetAccumulationBuffer() {
@@ -486,6 +547,14 @@ void OptixRenderer::cleanup() {
         }
     }
     material_textures.clear();
+
+    // Clean up envmap CDF arrays
+    if (envmap_cdf_marginal_array) {
+        CUDA_CHECK(cudaFreeArray(envmap_cdf_marginal_array));
+    }
+    if (envmap_cdf_conditional_array) {
+        CUDA_CHECK(cudaFreeArray(envmap_cdf_conditional_array));
+    }
 
     CUDA_CHECK(cudaFree((void*)device_buffers.d_pixels));
     CUDA_CHECK(cudaFree((void*)device_buffers.d_accum_buffer));
@@ -716,11 +785,11 @@ void OptixRenderer::switchScene(SceneID scene_id) {
         loadMap(current_scene_data.envmap_path);
     }
     else {
-        params.has_envmap = false;
+        params.envmap.has_envmap = false;
     }
 
-    params.envmap_scale = current_scene_data.envmap_scale;
-    params.envmap_exposure = current_scene_data.envmap_exposure;
+    params.envmap.scale = current_scene_data.envmap_scale;
+    params.envmap.exposure = current_scene_data.envmap_exposure;
 
     updateCamera({
          current_scene_data.camera_position,

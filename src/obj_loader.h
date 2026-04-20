@@ -299,47 +299,121 @@ inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
     return result;
 }
 
-inline cudaTextureObject_t loadEnvmap(const std::string& path) {
-    int width, height, channels;
-    // stbi_loadf gives float RGBA
-    float* data = stbi_loadf(path.c_str(), &width, &height, &channels, 4);
+// ===================================================================
+// ENVMAP CDF COMPUTATION for importance sampling
+// Compute 2D CDF weighted by luminance * sin(theta)
+// ===================================================================
+inline void computeEnvmapCDF(const float* hdr_data, int width, int height,
+    std::vector<float>& out_marginal_cdf,
+    std::vector<float>& out_conditional_cdf)
+{
+    out_marginal_cdf.resize(height, 0.0f);
+    out_conditional_cdf.resize(width * height, 0.0f);
 
-    if (!data) {
-        std::cerr << "[ENVMAP] Failed to load image: " << path << std::endl;
-        return 0;
+    // --- Step 1: Compute conditional CDFs (per row) ---
+    for (int v = 0; v < height; ++v) {
+        float row_integral = 0.0f;
+
+        // Compute row integral and build conditional CDF
+        for (int u = 0; u < width; ++u) {
+            int idx = (v * width + u) * 4;  // RGBA format
+            float r = hdr_data[idx + 0];
+            float g = hdr_data[idx + 1];
+            float b = hdr_data[idx + 2];
+
+            // Luminance with sin(theta) weighting for equirectangular distortion
+            float theta = ((float)v + 0.5f) / (float)height * 3.14159265f;
+            float sin_theta = sinf(theta);
+            float luminance = (0.2126f * r + 0.7152f * g + 0.0722f * b) * sin_theta;
+
+            row_integral += luminance;
+            out_conditional_cdf[v * width + u] = row_integral;
+        }
+
+        // Normalize conditional CDF for this row to [0,1]
+        if (row_integral > 1e-6f) {
+            for (int u = 0; u < width; ++u) {
+                out_conditional_cdf[v * width + u] /= row_integral;
+            }
+        }
+
+        // Store row integral for marginal CDF
+        out_marginal_cdf[v] = row_integral;
     }
 
-    if (width <= 0 || height <= 0) {
-        std::cerr << "[ENVMAP] Invalid dimensions: " << width << "x" << height << std::endl;
-        stbi_image_free(data);
-        return 0;
+    // --- Step 2: Compute marginal CDF (over rows) ---
+    float total_integral = 0.0f;
+    for (int v = 0; v < height; ++v) {
+        total_integral += out_marginal_cdf[v];
+        out_marginal_cdf[v] = total_integral;
     }
 
-    // Upload to a CUDA array
-    cudaChannelFormatDesc fmt = cudaCreateChannelDesc<float4>(); // fp16 saves VRAM
-    cudaArray_t cuArray;
-    cudaMallocArray(&cuArray, &fmt, width, height);
+    // Normalize marginal CDF to [0,1]
+    if (total_integral > 1e-6f) {
+        for (int v = 0; v < height; ++v) {
+            out_marginal_cdf[v] /= total_integral;
+        }
+    }
+}
 
-    // Convert float4 -> half4 if using fp16, or use cudaCreateChannelDesc<float4>()
-    cudaMemcpy2DToArray(cuArray, 0, 0, data,
-        width * 4 * sizeof(float),
-        width * 4 * sizeof(float), height,
-        cudaMemcpyHostToDevice);
-    stbi_image_free(data);
+// Upload CDF textures to GPU and return texture objects
+inline void uploadEnvmapCDFTextures(
+    const std::vector<float>& marginal_cdf,
+    const std::vector<float>& conditional_cdf,
+    int width, int height,
+    cudaTextureObject_t& out_marginal,
+    cudaTextureObject_t& out_conditional,
+    cudaArray_t& out_marginal_array,
+    cudaArray_t& out_conditional_array)
+{
+    // --- Upload marginal CDF (1D) ---
+    {
+        cudaChannelFormatDesc ch_desc = cudaCreateChannelDesc<float>();
 
-    // Create texture object with linear filtering
-    cudaResourceDesc resDesc = {};
-    resDesc.resType = cudaResourceTypeArray;
-    resDesc.res.array.array = cuArray;
+        cudaMallocArray(&out_marginal_array, &ch_desc, height, 1);
+        cudaMemcpyToArray(
+            out_marginal_array, 0, 0,
+            marginal_cdf.data(),
+            height * sizeof(float),
+            cudaMemcpyHostToDevice);
 
-    cudaTextureDesc texDesc = {};
-    texDesc.addressMode[0] = cudaAddressModeWrap;
-    texDesc.addressMode[1] = cudaAddressModeClamp;
-    texDesc.filterMode = cudaFilterModeLinear;
-    texDesc.readMode = cudaReadModeElementType;
-    texDesc.normalizedCoords = 1;
+        cudaResourceDesc res_desc = {};
+        res_desc.resType = cudaResourceTypeArray;
+        res_desc.res.array.array = out_marginal_array;
 
-    cudaTextureObject_t tex;
-    cudaCreateTextureObject(&tex, &resDesc, &texDesc, nullptr);
-    return tex;
+        cudaTextureDesc tex_desc = {};
+        tex_desc.addressMode[0] = cudaAddressModeClamp;
+        tex_desc.filterMode = cudaFilterModeLinear;
+        tex_desc.readMode = cudaReadModeElementType;
+        tex_desc.normalizedCoords = 0;
+
+        cudaCreateTextureObject(&out_marginal, &res_desc, &tex_desc, nullptr);
+    }
+
+    // --- Upload conditional CDF (2D) ---
+    {
+        cudaChannelFormatDesc ch_desc = cudaCreateChannelDesc<float>();
+
+        cudaMallocArray(&out_conditional_array, &ch_desc, width, height);
+        cudaMemcpy2DToArray(
+            out_conditional_array, 0, 0,
+            conditional_cdf.data(),
+            width * sizeof(float),
+            width * sizeof(float),
+            height,
+            cudaMemcpyHostToDevice);
+
+        cudaResourceDesc res_desc = {};
+        res_desc.resType = cudaResourceTypeArray;
+        res_desc.res.array.array = out_conditional_array;
+
+        cudaTextureDesc tex_desc = {};
+        tex_desc.addressMode[0] = cudaAddressModeClamp;
+        tex_desc.addressMode[1] = cudaAddressModeClamp;
+        tex_desc.filterMode = cudaFilterModeLinear;
+        tex_desc.readMode = cudaReadModeElementType;
+        tex_desc.normalizedCoords = 0;
+
+        cudaCreateTextureObject(&out_conditional, &res_desc, &tex_desc, nullptr);
+    }
 }

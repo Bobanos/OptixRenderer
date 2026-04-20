@@ -27,6 +27,23 @@ struct Light {
     int    _padding;               // for 16-byte alignment
 };
 
+struct EmissiveTriangle {
+    float3 v0, v1, v2;
+    float3 emission;        // radiance (can be > 1 for bright lights)
+};
+
+// Environment map parameters
+struct EnvironmentMap {
+    cudaTextureObject_t texture; // HDR environment map
+    cudaTextureObject_t cdf_marginal_v; // 1D texture: CDF over rows
+    cudaTextureObject_t cdf_conditional_u; // 2D texture: per-row CDF over columns
+	int width;
+	int height;
+    float               scale;   // intensity multiplier (can be > 1)
+    float               exposure; // additional exposure in stops
+    bool                has_envmap;
+};
+
 struct Params {
     uchar4* image;
     float3* accum_buffer; 
@@ -39,16 +56,15 @@ struct Params {
     Light   lights[4];
     int     num_lights;
 
+    EmissiveTriangle emissive_triangles[8];  // up to 8 area lights
+    int              num_emissive_triangles;
+
     int     max_bounce_depth;
     int     samples_per_pixel;
     int     current_sample;
     unsigned int random_seed;
 
-	// Environment map parameters
-	float envmap_scale;         // intensity multiplier
-    float envmap_exposure;
-    bool has_envmap;
-    cudaTextureObject_t envmap; // the HDR texture
+    EnvironmentMap envmap;
 };
 
 struct RayGenData {};
