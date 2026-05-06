@@ -458,11 +458,22 @@ extern "C" __global__ void __raygen__rg()
         params.accum_buffer[pixel] = (params.accum_buffer[pixel] * (N-1.f) + frame_color) / N;
     }
 
-    float3 fc = clamp(params.accum_buffer[pixel], 0.f, 1.f);
+    // float3 fc = clamp(params.accum_buffer[pixel], 0.f, 1.f);
+
+
+    // params.image[pixel] = make_uchar4(
+    //     (unsigned char)(fc.x * 255.99f),
+    //     (unsigned char)(fc.y * 255.99f),
+    //     (unsigned char)(fc.z * 255.99f), 255);
+
+    float3 final_color = params.accum_buffer[pixel] / (1.f + params.accum_buffer[pixel]);
+    final_color = final_color * 255.99f;
+
     params.image[pixel] = make_uchar4(
-        (unsigned char)(fc.x * 255.99f),
-        (unsigned char)(fc.y * 255.99f),
-        (unsigned char)(fc.z * 255.99f), 255);
+        (unsigned char)(final_color.x),
+        (unsigned char)(final_color.y),
+        (unsigned char)(final_color.z), 
+        255);
 }
 
 // ==========================================================================
@@ -508,7 +519,7 @@ extern "C" __global__ void __closesthit__ch()
 
     const HitGroupDataLambert* sbt = (HitGroupDataLambert*)optixGetSbtDataPointer();
 
-    float3 n      = getInterpolatedNormal(sbt, ray_dir);    // smooth shading normal
+    float3 normal = getInterpolatedNormal(sbt, ray_dir);    // smooth shading normal
     float3 n_geom = getGeometricNormal(sbt, ray_dir);       // geometric normal
     float3 albedo = getAlbedo(sbt);                         // material color
     float3 wo     = -normalize(ray_dir);                    // toward camera
@@ -557,10 +568,10 @@ extern "C" __global__ void __closesthit__ch()
         float  pdf_sa   = areaPdfToSolidAngle(pdf_area, dist, cos_l);
 
         if (!isOccluded(hit_pos + n_geom * EPS, wi_light, dist)) {
-            float3 f       = evalBlinnPhong(wi_light, wo, n, albedo, spec_col, shininess, kd, ks);
+            float3 f       = evalBlinnPhong(wi_light, wo, normal, albedo, spec_col, shininess, kd, ks);
             // BRDF PDF for this direction (needed for MIS weight)
-            float pdf_brdf = kd * pdfCosine(wi_light, n)
-                           + ks * pdfBlinnPhong(wi_light, wo, n, shininess);
+            float pdf_brdf = kd * pdfCosine(wi_light, normal)
+                           + ks * pdfBlinnPhong(wi_light, wo, normal, shininess);
             float w_light  = misWeight(pdf_sa, pdf_brdf);  // favor light sample when pdf_sa >> pdf_brdf
             direct = direct + w_light * f * Le * NdotL / fmaxf(pdf_sa, 1e-6f);
         }
@@ -580,9 +591,9 @@ extern "C" __global__ void __closesthit__ch()
         if (NdotL_e > 0.f && !isOccluded(hit_pos + n_geom * EPS, wi_env, 1e16f)) {
             float3 Le_env  = sampleEnvmap(params.envmap.texture, wi_env)
                            * params.envmap.scale * powf(2.f, params.envmap.exposure);
-            float3 f_env   = evalBlinnPhong(wi_env, wo, n, albedo, spec_col, shininess, kd, ks);
-            float pdf_brdf = kd * pdfCosine(wi_env, n)
-                           + ks * pdfBlinnPhong(wi_env, wo, n, shininess);
+            float3 f_env   = evalBlinnPhong(wi_env, wo, normal, albedo, spec_col, shininess, kd, ks);
+            float pdf_brdf = kd * pdfCosine(wi_env, normal)
+                           + ks * pdfBlinnPhong(wi_env, wo, normal, shininess);
             // MIS: favor envmap sample when pdf_env >> pdf_brdf (sharp bright spots)
             float w_env    = misWeight(pdf_env, pdf_brdf);
             direct = direct + w_env * f_env * Le_env * NdotL_e / fmaxf(pdf_env, 1e-6f);
@@ -622,22 +633,22 @@ extern "C" __global__ void __closesthit__ch()
 
         if (rnd(seed) < prob_diff) {
             // Sample diffuse lobe: cosine-weighted hemisphere
-            wi_bounce       = sampleCosineHemisphere(n, rnd(seed), rnd(seed));
-            float pd        = pdfCosine(wi_bounce, n);
-            float ps        = pdfBlinnPhong(wi_bounce, wo, n, shininess);
+            wi_bounce       = sampleCosineHemisphere(normal, rnd(seed), rnd(seed));
+            float pd        = pdfCosine(wi_bounce, normal);
+            float ps        = pdfBlinnPhong(wi_bounce, wo, normal, shininess);
             pdf_bounce      = prob_diff * pd + (1.f - prob_diff) * ps;  // mixture PDF
         } else {
             // Sample specular lobe: Blinn-Phong NDF
             float ps;
-            wi_bounce       = sampleBlinnPhong(wo, n, shininess, rnd(seed), rnd(seed), ps);
-            float pd        = pdfCosine(wi_bounce, n);
+            wi_bounce       = sampleBlinnPhong(wo, normal, shininess, rnd(seed), rnd(seed), ps);
+            float pd        = pdfCosine(wi_bounce, normal);
             pdf_bounce      = prob_diff * pd + (1.f - prob_diff) * ps;  // mixture PDF
         }
 
         float NdotL_geom_b = dot(n_geom, wi_bounce);
-        float NdotL_b = fmaxf(dot(n, wi_bounce), 0.f);
+        float NdotL_b = fmaxf(dot(normal, wi_bounce), 0.f);
         if (NdotL_geom_b > 0.f && NdotL_b > 0.f && pdf_bounce > 1e-6f) {
-            float3 f = evalBlinnPhong(wi_bounce, wo, n, albedo, spec_col, shininess, kd, ks);
+            float3 f = evalBlinnPhong(wi_bounce, wo, normal, albedo, spec_col, shininess, kd, ks);
 
             // MIS weight for BRDF sample vs envmap sampling.
             // If this bounce escapes to the envmap, the miss shader returns Le.

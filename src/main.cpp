@@ -292,17 +292,17 @@ int main() {
         );
         g_camera = &camera_controller;
 
-        // ----------------------------------------------------------
-        // Ship transform state
-        // ----------------------------------------------------------
-        float ship_rotation_x = initial_scene.object_rotation_x;
-        float ship_rotation_y = initial_scene.object_rotation_y;
-        float ship_rotation_z = initial_scene.object_rotation_z;
-        bool  auto_rotate = false;
-        float rotation_speed = 1.0f;
+        //// ----------------------------------------------------------
+        //// Ship transform state
+        //// ----------------------------------------------------------
+        //float ship_rotation_x = initial_scene.object_rotation_x;
+        //float ship_rotation_y = initial_scene.object_rotation_y;
+        //float ship_rotation_z = initial_scene.object_rotation_z;
+        //bool  auto_rotate = false;
+        //float rotation_speed = 1.0f;
 
-        // Update initial transform
-        renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
+        //// Update initial transform
+        //renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
 
         // Timing
         float deltaTime = 0.0f;
@@ -330,27 +330,27 @@ int main() {
             // Input processing
             processInput(window, deltaTime);
 
-            // Update ship rotation
-            if (auto_rotate)
-                ship_rotation_y += rotation_speed * DEG2RAD * deltaTime;
+   //         // Update ship rotation
+   //         if (auto_rotate)
+   //             ship_rotation_y += rotation_speed * DEG2RAD * deltaTime;
 
-            // Only update transform if rotation changed
-            static float last_rotation_x = 0.0f;
-            static float last_rotation_y = 0.0f;
-            static float last_rotation_z = 0.0f;
+   //         // Only update transform if rotation changed
+   //         static float last_rotation_x = 0.0f;
+   //         static float last_rotation_y = 0.0f;
+   //         static float last_rotation_z = 0.0f;
 
-            bool rotation_changed = (ship_rotation_x != last_rotation_x) ||
-                (ship_rotation_y != last_rotation_y) ||
-                (ship_rotation_z != last_rotation_z);
+   //         bool rotation_changed = (ship_rotation_x != last_rotation_x) ||
+   //             (ship_rotation_y != last_rotation_y) ||
+   //             (ship_rotation_z != last_rotation_z);
 
 			bool light_changed = false; 
 
-            if (rotation_changed) {
-                renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
-                last_rotation_x = ship_rotation_x;
-                last_rotation_y = ship_rotation_y;
-                last_rotation_z = ship_rotation_z;
-            }
+   //         if (rotation_changed) {
+   //             renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
+   //             last_rotation_x = ship_rotation_x;
+   //             last_rotation_y = ship_rotation_y;
+   //             last_rotation_z = ship_rotation_z;
+   //         }
 
             {
 				renderer->updateCamera(camera_controller.getCameraData());
@@ -504,42 +504,39 @@ int main() {
 
             ImGui::End();
 
-            // Ship Controls window
-            ImGui::Begin("Ship Controls");
-            ImGui::Text("Ship Transform");
-            ImGui::Checkbox("Auto Rotate Y", &auto_rotate);
-            ImGui::SliderFloat("Speed (deg/s)", &rotation_speed, 1.0f, 360.0f);
+            //// Ship Controls window
+            //ImGui::Begin("Scene Objects");
 
-            float rx_deg = ship_rotation_x * RAD2DEG;
-            float ry_deg = ship_rotation_y * RAD2DEG;
-            float rz_deg = ship_rotation_z * RAD2DEG;
+            //int obj_count = renderer->getObjectCount();
+            //for (int i = 0; i < obj_count; ++i) {
+            //    if (ImGui::TreeNode((const char*)nullptr, "Object %d: %s", i, renderer->getCurrentSceneData().objects[i].name.c_str())) {
+            //        float rx_deg, ry_deg, rz_deg;
+            //        renderer->getObjectRotation(i, rx_deg, ry_deg, rz_deg);
+            //        rx_deg *= RAD2DEG;
+            //        ry_deg *= RAD2DEG;
+            //        rz_deg *= RAD2DEG;
 
-            if (ImGui::SliderFloat("Rotation X (deg)", &rx_deg, -180.0f, 180.0f)) {
-                ship_rotation_x = rx_deg * DEG2RAD;
-                rotation_changed = true;
-            }
-            if (ImGui::SliderFloat("Rotation Y (deg)", &ry_deg, -180.0f, 180.0f)) {
-                ship_rotation_y = ry_deg * DEG2RAD;
-                rotation_changed = true;
-            }
-            if (ImGui::SliderFloat("Rotation Z (deg)", &rz_deg, -180.0f, 180.0f)) {
-                ship_rotation_z = rz_deg * DEG2RAD;
-                rotation_changed = true;
-            }
+            //        bool obj_changed = false;
+            //        if (ImGui::SliderFloat(("Rotation X##" + std::to_string(i)).c_str(), &rx_deg, -180.0f, 180.0f)) {
+            //            obj_changed = true;
+            //        }
+            //        if (ImGui::SliderFloat(("Rotation Y##" + std::to_string(i)).c_str(), &ry_deg, -180.0f, 180.0f)) {
+            //            obj_changed = true;
+            //        }
+            //        if (ImGui::SliderFloat(("Rotation Z##" + std::to_string(i)).c_str(), &rz_deg, -180.0f, 180.0f)) {
+            //            obj_changed = true;
+            //        }
 
-            if (rotation_changed) {
-                renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
-				renderer->resetAccumulationBuffer(); // Clear accumulation when manually adjusting rotation
-            }
+            //        if (obj_changed) {
+            //            renderer->updateObjectTransform(i, rx_deg * DEG2RAD, ry_deg * DEG2RAD, rz_deg * DEG2RAD);
+            //            renderer->resetAccumulationBuffer();
+            //        }
 
-            if (ImGui::Button("Reset Rotation")) {
-                ship_rotation_x = initial_scene.object_rotation_x;
-                ship_rotation_y = initial_scene.object_rotation_y;
-                ship_rotation_z = initial_scene.object_rotation_z;
-                renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
-                renderer->resetAccumulationBuffer();
-            }
-            ImGui::End();
+            //        ImGui::TreePop();
+            //    }
+            //}
+
+            //ImGui::End();
 
             ImGui::Begin("Scene Selection");
 

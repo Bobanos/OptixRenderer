@@ -57,14 +57,65 @@ void OptixRenderer::loadScene(SceneID scene_id) {
     current_scene_data = SceneManager::getSceneConfig(scene_id);
     current_scene_id = scene_id;
 
-    auto ship_meshes = loadObj(current_scene_data.obj_path, current_scene_data.mtl_path);
-    if (ship_meshes.empty()) throw std::runtime_error("No meshes loaded from OBJ");
+    // Load all objects in the scene and merge them
+    MergedObjMesh combined_mesh;
 
-    merged_mesh = mergeObjMeshes(ship_meshes);
-    DEBUG_LOGF("[Scene] Loaded: %s with %d materials", current_scene_data.name.c_str(), merged_mesh.materials.size());
+    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        const auto& obj_config = current_scene_data.objects[i];
+
+        auto meshes = loadObj(obj_config.obj_path, obj_config.mtl_path);
+        if (meshes.empty()) {
+            throw std::runtime_error("Failed to load object: " + obj_config.name);
+        }
+
+        auto obj_mesh = mergeObjMeshes(meshes);
+
+        // Merge this object into combined mesh
+        uint32_t vertex_base = (uint32_t)combined_mesh.vertices.size();
+        uint32_t material_base = (uint32_t)combined_mesh.materials.size();
+
+        // Copy vertices
+        for (const auto& v : obj_mesh.vertices) {
+            combined_mesh.vertices.push_back(v);
+        }
+
+        // Copy indices and remap material indices
+        for (const auto& tri : obj_mesh.indices) {
+            combined_mesh.indices.push_back(make_uint3(
+                tri.x + vertex_base,
+                tri.y + vertex_base,
+                tri.z + vertex_base
+            ));
+        }
+
+        // Copy SBT index buffer with material offset
+        for (uint32_t sbt_idx : obj_mesh.sbt_index_buffer) {
+            combined_mesh.sbt_index_buffer.push_back(sbt_idx + material_base);
+        }
+
+        // Copy materials
+        for (const auto& mat : obj_mesh.materials) {
+            combined_mesh.materials.push_back(mat);
+        }
+    }
+
+    merged_mesh = combined_mesh;
+
+    // Initialize transform state for each object
+    object_transforms.clear();
+    object_transforms.resize(current_scene_data.objects.size());
+    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        object_transforms[i].rotation_x = current_scene_data.objects[i].rotation_x;
+        object_transforms[i].rotation_y = current_scene_data.objects[i].rotation_y;
+        object_transforms[i].rotation_z = current_scene_data.objects[i].rotation_z;
+    }
+
+    DEBUG_LOGF("[Scene] Loaded: %s with %zu objects, %d materials",
+        current_scene_data.name.c_str(),
+        current_scene_data.objects.size(),
+        (int)merged_mesh.materials.size());
 
     uploadGeometryData();
-
     loadMap(current_scene_data.envmap_path);
 }
 
@@ -316,27 +367,38 @@ void OptixRenderer::buildGAS() {
 // sbtOffset = 0: base for SBT record lookup
 // ----------------------------------------------------------
 void OptixRenderer::buildIAS() {
-    createTransformMatrix(
-        current_scene_data.object_position,  // Use scene position
-        current_scene_data.object_scale,     // Use scene scale
-        instance.transform,
-        current_scene_data.object_rotation_x,
-        current_scene_data.object_rotation_y,
-        current_scene_data.object_rotation_z
-    );
-    instance.instanceId = 0;
-    instance.sbtOffset = 0;
-    instance.visibilityMask = 255;
-    instance.flags = OPTIX_INSTANCE_FLAG_NONE;
-    instance.traversableHandle = gas_handle;
+    // Create instances for each object
+    instances.clear();
+    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        const auto& obj_config = current_scene_data.objects[i];
 
-    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_instances, sizeof(OptixInstance)));
-    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_instances, &instance, sizeof(OptixInstance), cudaMemcpyHostToDevice));
+        OptixInstance instance = {};
+        createTransformMatrix(
+            obj_config.position,
+            obj_config.scale,
+            instance.transform,
+            object_transforms[i].rotation_x,
+            object_transforms[i].rotation_y,
+            object_transforms[i].rotation_z
+        );
+        instance.instanceId = (unsigned int)i;
+        instance.sbtOffset = 0;  // All instances share the same SBT
+        instance.visibilityMask = 255;
+        instance.flags = OPTIX_INSTANCE_FLAG_NONE;
+        instance.traversableHandle = gas_handle;
+
+        instances.push_back(instance);
+    }
+
+    // Upload instances to GPU
+    size_t instances_size = instances.size() * sizeof(OptixInstance);
+    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_instances, instances_size));
+    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_instances, instances.data(), instances_size, cudaMemcpyHostToDevice));
 
     OptixBuildInput inst_input = {};
     inst_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
     inst_input.instanceArray.instances = device_buffers.d_instances;
-    inst_input.instanceArray.numInstances = 1;
+    inst_input.instanceArray.numInstances = (unsigned int)instances.size();
 
     OptixAccelBuildOptions ias_opts = {};
     ias_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
@@ -347,7 +409,6 @@ void OptixRenderer::buildIAS() {
     CUdeviceptr d_ias_temp;
     CUDA_CHECK(cudaMalloc((void**)&d_ias_temp, ias_sizes.tempSizeInBytes));
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_ias_output, ias_sizes.outputSizeInBytes));
-    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_ias_temp_rt, ias_sizes.tempSizeInBytes));
 
     OPTIX_CHECK(optixAccelBuild(context, 0, &ias_opts, &inst_input, 1,
         d_ias_temp, ias_sizes.tempSizeInBytes,
@@ -355,7 +416,7 @@ void OptixRenderer::buildIAS() {
         &ias_handle, nullptr, 0));
 
     CUDA_CHECK(cudaFree((void*)d_ias_temp));
-    DEBUG_LOG("[IAS] Built");
+    DEBUG_LOGF("[IAS] Built with %zu instances", instances.size());
 }
 
 // ----------------------------------------------------------
@@ -382,9 +443,9 @@ void OptixRenderer::buildSBT() {
             rec.data.indices = (uint3*)device_buffers.d_indices;
             rec.data.refraction_index = mat.ior;
 
-            for (auto& v : merged_mesh.vertices) {
-                v.color = mat.color;  // Set vertex color to material color
-            }
+            //for (auto& v : merged_mesh.vertices) {
+            //    v.color = mat.color;  // Set vertex color to material color
+            //}
 
             hit_records.resize(hit_records.size() + max_stride);
             std::memcpy(hit_records.data() + mat_idx * max_stride, &rec, sizeof(HitGroupRecordGlass));
@@ -417,9 +478,9 @@ void OptixRenderer::buildSBT() {
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_hg, hit_records.size()));
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_hg, hit_records.data(), hit_records.size(), cudaMemcpyHostToDevice));
 
-    // Re-upload vertices with corrected colors
-    size_t cv = merged_mesh.vertices.size() * sizeof(ColoredVertex);
-    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_vertices, merged_mesh.vertices.data(), cv, cudaMemcpyHostToDevice));
+    //// Re-upload vertices with corrected colors
+    //size_t cv = merged_mesh.vertices.size() * sizeof(ColoredVertex);
+    //CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_vertices, merged_mesh.vertices.data(), cv, cudaMemcpyHostToDevice));
 
 
     RayGenRecord raygen_record = {};
@@ -501,11 +562,6 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
 	params.current_sample++;
-}
-
-void OptixRenderer::updateInstanceTransform(const float transform[12]) {
-    std::memcpy(instance.transform, transform, sizeof(instance.transform));
-    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_instances, &instance, sizeof(OptixInstance), cudaMemcpyHostToDevice));
 }
 
 void OptixRenderer::updateLightParametersPos(int light_idx, float3 position_or_direction) {
@@ -652,38 +708,40 @@ cudaTextureObject_t OptixRenderer::loadTextureFromFile(const std::string& path, 
     return tex;
 }
 
-void OptixRenderer::updateShipTransform(float rotation_x, float rotation_y, float rotation_z) {
-    ship_rotation_x = rotation_x;
-    ship_rotation_y = rotation_y;
-    ship_rotation_z = rotation_z;
+void OptixRenderer::updateObjectTransform(int object_idx, float rotation_x, float rotation_y, float rotation_z) {
+    if (object_idx < 0 || object_idx >= (int)object_transforms.size()) return;
 
-    // Update the instance transform
-    float sc = 0.05f;
+    object_transforms[object_idx].rotation_x = rotation_x;
+    object_transforms[object_idx].rotation_y = rotation_y;
+    object_transforms[object_idx].rotation_z = rotation_z;
+
+    const auto& obj_config = current_scene_data.objects[object_idx];
     createTransformMatrix(
-        current_scene_data.object_position,
-        current_scene_data.object_scale,
-        instance.transform,
-        ship_rotation_x,
-        ship_rotation_y,
-        ship_rotation_z
+        obj_config.position,
+        obj_config.scale,
+        instances[object_idx].transform,
+        rotation_x,
+        rotation_y,
+        rotation_z
     );
 
-    // Copy to GPU
-    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_instances, &instance,
-        sizeof(OptixInstance), cudaMemcpyHostToDevice));
+    // Update this instance on GPU
+    size_t offset = object_idx * sizeof(OptixInstance);
+    CUDA_CHECK(cudaMemcpy(
+        (void*)((CUdeviceptr)device_buffers.d_instances + offset),
+        &instances[object_idx],
+        sizeof(OptixInstance),
+        cudaMemcpyHostToDevice
+    ));
 
-    // Rebuild the IAS with the new transform
     rebuildIAS();
 }
 
-void OptixRenderer::setShipRotation(float rotation_x, float rotation_y, float rotation_z) {
-    updateShipTransform(rotation_x, rotation_y, rotation_z);
-}
-
-void OptixRenderer::getShipRotation(float& rotation_x, float& rotation_y, float& rotation_z) const {
-    rotation_x = ship_rotation_x;
-    rotation_y = ship_rotation_y;
-    rotation_z = ship_rotation_z;
+void OptixRenderer::getObjectRotation(int object_idx, float& rotation_x, float& rotation_y, float& rotation_z) const {
+    if (object_idx < 0 || object_idx >= (int)object_transforms.size()) return;
+    rotation_x = object_transforms[object_idx].rotation_x;
+    rotation_y = object_transforms[object_idx].rotation_y;
+    rotation_z = object_transforms[object_idx].rotation_z;
 }
 
 void OptixRenderer::rebuildIAS() {
@@ -691,7 +749,7 @@ void OptixRenderer::rebuildIAS() {
     OptixBuildInput inst_input = {};
     inst_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
     inst_input.instanceArray.instances = device_buffers.d_instances;
-    inst_input.instanceArray.numInstances = 1;
+    inst_input.instanceArray.numInstances = (unsigned int)instances.size();;
 
     OptixAccelBuildOptions ias_opts = {};
     ias_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
@@ -754,11 +812,67 @@ void OptixRenderer::switchScene(SceneID scene_id) {
     if (device_buffers.d_sbt_indices) CUDA_CHECK(cudaFree((void*)device_buffers.d_sbt_indices));
     if (device_buffers.d_gas_output) CUDA_CHECK(cudaFree((void*)device_buffers.d_gas_output));
     if (device_buffers.d_hg) CUDA_CHECK(cudaFree((void*)device_buffers.d_hg));
+    if (device_buffers.d_instances) CUDA_CHECK(cudaFree((void*)device_buffers.d_instances));
 
-    // Load new scene
-    auto meshes = loadObj(current_scene_data.obj_path, current_scene_data.mtl_path);
-    merged_mesh = mergeObjMeshes(meshes);
+    // Load all objects in the scene and merge them
+    MergedObjMesh combined_mesh;
+
+    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        const auto& obj_config = current_scene_data.objects[i];
+
+        auto meshes = loadObj(obj_config.obj_path, obj_config.mtl_path);
+        if (meshes.empty()) {
+            throw std::runtime_error("Failed to load object: " + obj_config.name);
+        }
+
+        auto obj_mesh = mergeObjMeshes(meshes);
+
+        // Merge this object into combined mesh
+        uint32_t vertex_base = (uint32_t)combined_mesh.vertices.size();
+        uint32_t material_base = (uint32_t)combined_mesh.materials.size();
+
+        // Copy vertices
+        for (const auto& v : obj_mesh.vertices) {
+            combined_mesh.vertices.push_back(v);
+        }
+
+        // Copy indices and remap material indices
+        for (const auto& tri : obj_mesh.indices) {
+            combined_mesh.indices.push_back(make_uint3(
+                tri.x + vertex_base,
+                tri.y + vertex_base,
+                tri.z + vertex_base
+            ));
+        }
+
+        // Copy SBT index buffer with material offset
+        for (uint32_t sbt_idx : obj_mesh.sbt_index_buffer) {
+            combined_mesh.sbt_index_buffer.push_back(sbt_idx + material_base);
+        }
+
+        // Copy materials
+        for (const auto& mat : obj_mesh.materials) {
+            combined_mesh.materials.push_back(mat);
+        }
+    }
+
+    merged_mesh = combined_mesh;
+
+    // Initialize transform state for each object
+    object_transforms.clear();
+    object_transforms.resize(current_scene_data.objects.size());
+    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        object_transforms[i].rotation_x = current_scene_data.objects[i].rotation_x;
+        object_transforms[i].rotation_y = current_scene_data.objects[i].rotation_y;
+        object_transforms[i].rotation_z = current_scene_data.objects[i].rotation_z;
+    }
+
+    DEBUG_LOGF("[Scene] Loading: %s with %zu objects",
+        current_scene_data.name.c_str(),
+        current_scene_data.objects.size());
+
     uploadGeometryData();
+    loadMap(current_scene_data.envmap_path);
 
     // Rebuild acceleration structures
     buildGAS();
@@ -766,13 +880,6 @@ void OptixRenderer::switchScene(SceneID scene_id) {
 
     // Rebuild SBT
     buildSBT();
-
-    // Reset ship transform to scene defaults
-    ship_rotation_x = current_scene_data.object_rotation_x;
-    ship_rotation_y = current_scene_data.object_rotation_y;
-    ship_rotation_z = current_scene_data.object_rotation_z;
-
-    updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
 
     // Update lighting
     params.num_lights = current_scene_data.num_lights;
@@ -801,5 +908,8 @@ void OptixRenderer::switchScene(SceneID scene_id) {
     // Reset accumulation
     resetAccumulationBuffer();
 
-    DEBUG_LOGF("[Scene] Switched to: %s", current_scene_data.name.c_str());
+    DEBUG_LOGF("[Scene] Switched to: %s with %zu objects, %d total materials",
+        current_scene_data.name.c_str(),
+        current_scene_data.objects.size(),
+        (int)merged_mesh.materials.size());
 }

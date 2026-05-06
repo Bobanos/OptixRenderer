@@ -12,11 +12,11 @@
 
 
 #ifdef _DEBUG
-    #define DEBUG_LOG(msg) std::cout << msg << std::endl
-    #define DEBUG_LOGF(fmt, ...) printf(fmt "\n", __VA_ARGS__)
+#define DEBUG_LOG(msg) std::cout << msg << std::endl
+#define DEBUG_LOGF(fmt, ...) printf(fmt "\n", __VA_ARGS__)
 #else
-    #define DEBUG_LOG(msg) (void)0
-    #define DEBUG_LOGF(fmt, ...) (void)0
+#define DEBUG_LOG(msg) (void)0
+#define DEBUG_LOGF(fmt, ...) (void)0
 #endif
 
 #define CUDA_CHECK(x) r_util::cudaCheck((x), __FILE__, __LINE__)
@@ -56,17 +56,20 @@ public:
 
     // Rendering
     void render(const Camera& camera, int samples_per_pixel);
-    void updateInstanceTransform(const float transform[12]);
+    void updateInstanceTransform(int instance_idx, const float transform[12]);
     void updateLightParametersPos(int light_idx, float3 pos);
     void updateLightParametersColor(int light_idx, float3 color);
-	void updateEnvmapParameters(float scale, float exposure);
+    void updateEnvmapParameters(float scale, float exposure);
 
-    void updateShipTransform(float rotation_x, float rotation_y, float rotation_z);
+    // Multi-object transforms
+    void updateObjectTransform(int object_idx, float rotation_x, float rotation_y, float rotation_z);
+    void getObjectRotation(int object_idx, float& rotation_x, float& rotation_y, float& rotation_z) const;
 
     // Scene switching
     void switchScene(SceneID scene_id);
     SceneID getCurrentSceneID() const { return current_scene_id; }
     std::string getCurrentSceneName() const { return current_scene_data.name; }
+    int getObjectCount() const { return (int)object_transforms.size(); }
 
     // Getters
     uchar4* getPixelBuffer() const { return params.image; }
@@ -74,14 +77,12 @@ public:
     int getWidth() const { return params.width; }
     int getHeight() const { return params.height; }
     Params& getParams() { return params; }
-    void getShipRotation(float& rotation_x, float& rotation_y, float& rotation_z) const;
     SceneData getCurrentSceneData() const { return current_scene_data; }
 
     // Parameter updates
     void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
     void setSamplesPerPixel(int spp) { params.samples_per_pixel = spp; }
     void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
-    void setShipRotation(float rotation_x, float rotation_y, float rotation_z);
 
     void updateCamera(const Camera& camera);
     void resetAccumulationBuffer();
@@ -126,7 +127,7 @@ private:
 
     // Scene data
     MergedObjMesh merged_mesh;
-    OptixInstance instance;
+    std::vector<OptixInstance> instances;
 
     // Host params
     Params params = {};
@@ -137,10 +138,16 @@ private:
     };
     std::vector<MaterialTextures> material_textures;
 
-	//Model transform state
-    float ship_rotation_x = 0.0f;
-    float ship_rotation_y = 0.0f;
-    float ship_rotation_z = 0.0f;
+    // Object transform state (per object)
+    struct ObjectTransform {
+        float rotation_x = 0.0f;
+        float rotation_y = 0.0f;
+        float rotation_z = 0.0f;
+    };
+    std::vector<ObjectTransform> object_transforms;
+
+    // Track material offsets for each object
+    std::vector<uint32_t> object_material_offsets;
 
     Camera last_camera = {};
 
@@ -168,7 +175,7 @@ private:
         float transform[12],
         float rot_x,
         float rot_y,
-		float rot_z
+        float rot_z
     );
     std::vector<char> loadFile(const std::string& path);
     cudaTextureObject_t loadTextureFromFile(const std::string& path, cudaArray_t& out_array);

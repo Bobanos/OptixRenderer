@@ -82,11 +82,15 @@ struct HitGroupDataLambert : public HitGroupDataCommon
 {
     float3 albedo;
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
+    //float3 emissive_color;
+    //float emissive_intensity;
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
     float refraction_index;
+    //float3 emissive_color;
+    //float emissive_intensity;
 };
 
 // Compile-time verification template for derived hit group types
