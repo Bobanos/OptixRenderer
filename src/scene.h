@@ -101,7 +101,7 @@ private:
         obj2.rotation_y = 0.0f;
         obj2.rotation_z = 0.0f;
         obj2.is_emissive = false;
-        scene.objects.push_back(obj2);
+        //scene.objects.push_back(obj2);
 
         SceneObject obj3;
         obj3.name = "Geosphere";
@@ -113,7 +113,7 @@ private:
         obj3.rotation_y = 0.0f;
         obj3.rotation_z = 0.0f;
         obj3.is_emissive = false;
-        scene.objects.push_back(obj3);  
+        //scene.objects.push_back(obj3);  
 
         // Point Light 1
         scene.lights[0].type = 0;
