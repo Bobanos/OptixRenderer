@@ -271,7 +271,7 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-        renderer->loadScene(SceneID::ALLIED_AVENGER);
+        renderer->loadScene(SceneID::SPITFIRE);
         renderer->setupShaders();
         renderer->buildAccelerationStructures();
         renderer->setupLighting();
@@ -280,7 +280,7 @@ int main() {
         ImGuiDisplayBuffer display(width, height);
 
         // Get initial scene data
-        SceneData initial_scene = SceneManager::getSceneConfig(SceneID::ALLIED_AVENGER);
+        SceneData initial_scene = SceneManager::getSceneConfig(SceneID::SPITFIRE);
 
         // Create camera
         CameraController camera_controller(

@@ -139,3 +139,20 @@ FLOAT3_DEVICE inline float3 exp(const float3& v) {
 FLOAT3_DEVICE inline float3 log(const float3& v) {
     return make_float3(::log(v.x), ::log(v.y), ::log(v.z));
 }
+
+// Linear interpolation (mix): a * (1 - t) + b * t
+FLOAT3_DEVICE inline float mix(float a, float b, float t) {
+    return a * (1.0f - t) + b * t;
+}
+
+FLOAT3_DEVICE inline float3 mix(const float3& a, const float3& b, float t) {
+    return a * (1.0f - t) + b * t;
+}
+
+FLOAT3_DEVICE inline float3 mix(const float3& a, const float3& b, const float3& t) {
+    return make_float3(
+        a.x * (1.0f - t.x) + b.x * t.x,
+        a.y * (1.0f - t.y) + b.y * t.y,
+        a.z * (1.0f - t.z) + b.z * t.z
+    );
+}

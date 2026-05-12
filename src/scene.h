@@ -22,11 +22,7 @@ struct SceneObject {
     float3 scale;
     float rotation_x;
     float rotation_y;
-    float rotation_z;
-
-    bool is_emissive = false;           
-    float3 emissive_color = { 0, 0, 0 };
-    float emissive_intensity = 0.0f;   
+    float rotation_z; 
 };
 
 struct SceneData {
@@ -87,7 +83,6 @@ private:
         obj.rotation_x = -M_PI / 2.0f;
         obj.rotation_y = -M_PI / 3.0f;
         obj.rotation_z = 0.0f;
-        obj.is_emissive = false;
         scene.objects.push_back(obj);
 
         // Single object
@@ -100,7 +95,6 @@ private:
         obj2.rotation_x = 0.0f;
         obj2.rotation_y = 0.0f;
         obj2.rotation_z = 0.0f;
-        obj2.is_emissive = false;
         //scene.objects.push_back(obj2);
 
         SceneObject obj3;
@@ -108,12 +102,11 @@ private:
         obj3.obj_path = "assets/geosphere_glass/geosphere.obj";
         obj3.mtl_path = "assets/geosphere_glass/geosphere_glass.mtl";
         obj3.scale = make_float3(1.0f, 1.0f, 1.0f);
-        obj3.position = make_float3(2.0f, 0.0f, 0.0f);
+        obj3.position = make_float3(0.0f, 3.0f, 0.0f);
         obj3.rotation_x = 0.0f;
         obj3.rotation_y = 0.0f;
         obj3.rotation_z = 0.0f;
-        obj3.is_emissive = false;
-        //scene.objects.push_back(obj3);  
+        scene.objects.push_back(obj3);  
 
         // Point Light 1
         scene.lights[0].type = 0;
@@ -160,7 +153,7 @@ private:
         obj.rotation_x = 0.0f;
         obj.rotation_y = 0.0f;
         obj.rotation_z = 0.0f;
-        obj.is_emissive = false;
+
         scene.objects.push_back(obj);
 
         scene.lights[0].type = 1;
@@ -180,22 +173,21 @@ private:
         scene.name = "Spitfire";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
-        scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
-        scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+        scene.camera_position = make_float3(3.75f, 1.5f, 4.4f);
+        scene.camera_lookat = make_float3(0.0f, -0.5f, 2.0f);
         scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
         scene.camera_vfov = 60.0f;
 
         // Single object
         SceneObject obj;
         obj.name = "Spitfire";
-        obj.obj_path = "assets/spitfire/spitfire.obj";
-        obj.mtl_path = "assets/spitfire/spitfire.mtl";
+        obj.obj_path = "assets/spitfire/spitfire_and_company.obj";
+        obj.mtl_path = "assets/spitfire/spitfire_and_company.mtl";
         obj.scale = make_float3(0.01f, 0.01f, 0.01f);
         obj.position = make_float3(0.0f, 0.0f, 0.0f);
         obj.rotation_x = 0.0f;
         obj.rotation_y = 0.0f;
         obj.rotation_z = 0.0f;
-        obj.is_emissive = false;
         scene.objects.push_back(obj);
 
         scene.num_lights = 0;

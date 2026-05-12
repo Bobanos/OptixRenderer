@@ -59,9 +59,13 @@ void OptixRenderer::loadScene(SceneID scene_id) {
 
     // Load all objects in the scene and merge them
     MergedObjMesh combined_mesh;
+    object_material_bases.clear();
 
     for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
         const auto& obj_config = current_scene_data.objects[i];
+
+        // Record material base BEFORE merging
+        object_material_bases.push_back((uint32_t)combined_mesh.materials.size());
 
         auto meshes = loadObj(obj_config.obj_path, obj_config.mtl_path);
         if (meshes.empty()) {
@@ -363,8 +367,7 @@ void OptixRenderer::buildGAS() {
 }
 
 // ----------------------------------------------------------
-// Build IAS — one instance pointing at the single GAS
-// sbtOffset = 0: base for SBT record lookup
+// Build IAS — per-instance SBT offset for correct material lookup
 // ----------------------------------------------------------
 void OptixRenderer::buildIAS() {
     // Create instances for each object
@@ -382,10 +385,12 @@ void OptixRenderer::buildIAS() {
             object_transforms[i].rotation_z
         );
         instance.instanceId = (unsigned int)i;
-        instance.sbtOffset = 0;  // All instances share the same SBT
+        instance.sbtOffset = 0;//object_material_bases[i];  // Per-object material offset
         instance.visibilityMask = 255;
         instance.flags = OPTIX_INSTANCE_FLAG_NONE;
         instance.traversableHandle = gas_handle;
+
+        DEBUG_LOGF("[IAS] Max offset: %d", OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_OFFSET);
 
         instances.push_back(instance);
     }
@@ -442,7 +447,7 @@ void OptixRenderer::buildSBT() {
             rec.data.vertices = (ColoredVertex*)device_buffers.d_vertices;
             rec.data.indices = (uint3*)device_buffers.d_indices;
             rec.data.refraction_index = mat.ior;
-
+            
             //for (auto& v : merged_mesh.vertices) {
             //    v.color = mat.color;  // Set vertex color to material color
             //}
@@ -456,6 +461,8 @@ void OptixRenderer::buildSBT() {
             rec.data.vertices = (ColoredVertex*)device_buffers.d_vertices;
             rec.data.indices = (uint3*)device_buffers.d_indices;
             rec.data.albedo = mat.color;
+            rec.data.shininess = 32.f;
+            rec.data.specular_color = { 0.04, 0.04, 0.04 };
 
             // Load texture if available
             if (!mat.texture_path.empty()) {
@@ -814,10 +821,14 @@ void OptixRenderer::switchScene(SceneID scene_id) {
     if (device_buffers.d_hg) CUDA_CHECK(cudaFree((void*)device_buffers.d_hg));
     if (device_buffers.d_instances) CUDA_CHECK(cudaFree((void*)device_buffers.d_instances));
 
+    object_material_bases.clear();
+    uint32_t mat_offset = 0;
+
     // Load all objects in the scene and merge them
     MergedObjMesh combined_mesh;
 
     for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
+        object_material_bases.push_back(mat_offset);
         const auto& obj_config = current_scene_data.objects[i];
 
         auto meshes = loadObj(obj_config.obj_path, obj_config.mtl_path);

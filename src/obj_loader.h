@@ -119,7 +119,7 @@ inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
                     auto& m = materials[current_mat];
                     mat_color[current_mat] = m.kd;
                     mat_ior[current_mat] = m.ni;
-                    mat_glass[current_mat] = (m.illum == 3 || m.ni > 1.01f);
+                    mat_glass[current_mat] = (m.illum == 10);//3 || m.ni > 1.01f);
                     mat_texture[current_mat] = m.map_kd;
                 }
                 else {

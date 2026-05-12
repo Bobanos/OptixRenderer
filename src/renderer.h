@@ -125,6 +125,8 @@ private:
     OptixAccelBufferSizes gas_sizes;
     OptixAccelBufferSizes ias_sizes;
 
+    std::vector<uint32_t> object_material_bases;  // Material offset for each object instance
+
     // Scene data
     MergedObjMesh merged_mesh;
     std::vector<OptixInstance> instances;

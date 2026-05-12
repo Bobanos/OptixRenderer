@@ -27,11 +27,6 @@ struct Light {
     int    _padding;               // for 16-byte alignment
 };
 
-struct EmissiveTriangle {
-    float3 v0, v1, v2;
-    float3 emission;        // radiance (can be > 1 for bright lights)
-};
-
 // Environment map parameters
 struct EnvironmentMap {
     cudaTextureObject_t texture; // HDR environment map
@@ -56,9 +51,6 @@ struct Params {
     Light   lights[4];
     int     num_lights;
 
-    EmissiveTriangle emissive_triangles[8];  // up to 8 area lights
-    int              num_emissive_triangles;
-
     int     max_bounce_depth;
     int     samples_per_pixel;
     int     current_sample;
@@ -82,15 +74,13 @@ struct HitGroupDataLambert : public HitGroupDataCommon
 {
     float3 albedo;
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
-    //float3 emissive_color;
-    //float emissive_intensity;
+    float  shininess;       // Blinn-Phong exponent, e.g. 32.0f
+    float3 specular_color;  // F0, e.g. {0.04, 0.04, 0.04} for plastic
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
     float refraction_index;
-    //float3 emissive_color;
-    //float emissive_intensity;
 };
 
 // Compile-time verification template for derived hit group types
