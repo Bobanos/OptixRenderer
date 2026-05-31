@@ -14,23 +14,23 @@ struct Camera {
 
 struct ColoredVertex {
     float3 position;
-    float3 color;
+    //float3 color;
     float3 normal;
     float2 uv;
 };
 
-// Light types: 0 = point light, 1 = directional light
-struct Light {
-    float3 position_or_direction;  // position for point light, direction for directional light
-    float3 color;
-    int    type;                   // 0 = point, 1 = directional
-    int    _padding;               // for 16-byte alignment
-};
+//// Light types: 0 = point light, 1 = directional light
+//struct Light {
+//    float3 position_or_direction;  // position for point light, direction for directional light
+//    float3 color;
+//    int    type;                   // 0 = point, 1 = directional
+//    int    _padding;               // for 16-byte alignment
+//};
 
-struct EmissiveTriangle {
-    float3 v0, v1, v2;
-    float3 emission;        // radiance (can be > 1 for bright lights)
-};
+//struct EmissiveTriangle {
+//    float3 v0, v1, v2;
+//    float3 emission;        // radiance (can be > 1 for bright lights)
+//};
 
 // Environment map parameters
 struct EnvironmentMap {
@@ -52,12 +52,14 @@ struct Params {
     Camera  camera;
     OptixTraversableHandle traversable;
 
-    // Flexible light system
-    Light   lights[4];
-    int     num_lights;
+    //// Flexible light system
+    //Light   lights[4];
+    //int     num_lights;
 
-    EmissiveTriangle emissive_triangles[8];  // up to 8 area lights
-    int              num_emissive_triangles;
+    //EmissiveTriangle emissive_triangles[8];  // up to 8 area lights
+    //int              num_emissive_triangles;
+
+    float   light_intensity;
 
     int     max_bounce_depth;
     int     samples_per_pixel;
@@ -68,29 +70,27 @@ struct Params {
 };
 
 struct RayGenData {};
+
 struct MissData {};
-
-
 
 struct HitGroupDataCommon
 {
     ColoredVertex* vertices;
-    uint3* indices;
+    uint3* indices; 
+	float3 albedo;  // Base color (if no texture)
+	float3 emission;  // Emissive color (can be > 1 for bright materials)
+	cudaTextureObject_t emission_texture; // 0 = no texture, use emission color
 };
 
 struct HitGroupDataLambert : public HitGroupDataCommon
 {
-    float3 albedo;
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
-    //float3 emissive_color;
-    //float emissive_intensity;
+
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
     float refraction_index;
-    //float3 emissive_color;
-    //float emissive_intensity;
 };
 
 // Compile-time verification template for derived hit group types

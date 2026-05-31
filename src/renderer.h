@@ -50,7 +50,6 @@ public:
     void initOptix();
     void loadScene(SceneID scene_id);
     void loadMap(const std::string& path);
-    void buildAccelerationStructures();
     void setupShaders();
     void setupLighting();
 
@@ -60,6 +59,7 @@ public:
     void updateLightParametersPos(int light_idx, float3 pos);
     void updateLightParametersColor(int light_idx, float3 color);
     void updateEnvmapParameters(float scale, float exposure);
+    void updateLightIntensity(float light_intensity);
 
     // Multi-object transforms
     void updateObjectTransform(int object_idx, float rotation_x, float rotation_y, float rotation_z);
@@ -90,17 +90,11 @@ public:
 private:
     // Device pointers
     struct DeviceBuffers {
-        CUdeviceptr d_vertices = 0;
-        CUdeviceptr d_positions = 0;
-        CUdeviceptr d_indices = 0;
-        CUdeviceptr d_sbt_indices = 0;
         CUdeviceptr d_pixels = 0;
         CUdeviceptr d_accum_buffer = 0;
         CUdeviceptr d_params = 0;
-        CUdeviceptr d_gas_output = 0;
-        CUdeviceptr d_ias_output = 0;
+        CUdeviceptr d_ias_output_buffer = 0;
         CUdeviceptr d_instances = 0;
-        CUdeviceptr d_ias_temp_rt = 0;
         CUdeviceptr d_hg = 0;
         CUdeviceptr d_rg = 0;
         CUdeviceptr d_ms = 0;
@@ -120,23 +114,33 @@ private:
     OptixProgramGroup hitgroup_glass_program_group = nullptr;
 
     // Acceleration structures
-    OptixTraversableHandle gas_handle = 0;
     OptixTraversableHandle ias_handle = 0;
-    OptixAccelBufferSizes gas_sizes;
-    OptixAccelBufferSizes ias_sizes;
+    std::vector<OptixAccelBufferSizes> gas_sizes;
+    OptixAccelBufferSizes  ias_buffer_sizes;
+
+    // One per placed object in the scene — references a SceneObject
+    struct SceneObjectInstance {
+        LoadedSceneObject* object = nullptr;       // which geometry
+        float              transform[12]{ 1,0,0,0,
+                                           0,1,0,0,
+                                           0,0,1,0 }; // where/how it's placed
+    };
 
     // Scene data
-    MergedObjMesh merged_mesh;
-    std::vector<OptixInstance> instances;
+	std::vector<LoadedSceneObject>   loaded_scene_objects;
+    std::vector<SceneObjectInstance> scene_instances;
+
+    struct TextureData {
+        std::string         name = "";
+        cudaTextureObject_t tex = 0;
+        cudaArray_t         array = nullptr;
+    };
+
+    // Global cache — key is the resolved absolute path
+    std::unordered_map<std::string, TextureData> texture_cache;
 
     // Host params
     Params params = {};
-
-    struct MaterialTextures {
-        cudaTextureObject_t albedo_tex = 0;
-        cudaArray_t albedo_array = nullptr;
-    };
-    std::vector<MaterialTextures> material_textures;
 
     // Object transform state (per object)
     struct ObjectTransform {
@@ -163,20 +167,26 @@ private:
     // Helper methods
     void createModuleAndProgramGroups();
     void createPipeline();
-    void uploadGeometryData();
-    void buildGAS();
+    void uploadSceneObject(LoadedSceneObject& obj);
+    void buildGAS(LoadedSceneObject& obj, int index);
     void buildIAS();
     void buildSBT();
     void cleanup();
+    void FreeDeviceBuffers();
+    void FreeTexturesAndEnvMaps();
 
     void createTransformMatrix(
+        float(&transform)[12],
         const float3 translation,
         const float3 scale,
-        float transform[12],
         float rot_x,
         float rot_y,
         float rot_z
     );
+
+	uint32_t current_sbt_offset = 0;  // Used for IAS. Tracks the next available SBT offset for hit groups as we build IAS
+
     std::vector<char> loadFile(const std::string& path);
-    cudaTextureObject_t loadTextureFromFile(const std::string& path, cudaArray_t& out_array);
+    cudaTextureObject_t loadTextureCached(const std::string& resolved_path);
+    //cudaTextureObject_t loadTextureFromFile(const std::string& path, cudaArray_t& out_array);
 };

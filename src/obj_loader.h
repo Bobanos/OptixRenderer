@@ -6,297 +6,352 @@
 #include <sstream>
 #include <iostream>
 #include <unordered_map>
+#include <unordered_set>
+#include <filesystem>
 #include <cuda_runtime.h>
 
 #include "optix_params.h"
 #include "stb_image.h"
 #include "float3_math.h"
+#include "tiny_obj_loader.h"
 
-struct ObjMesh {
-    std::string                material_name;
+// Your own material — only the fields you use
+struct ObjMaterial {
+    std::string name;
+    float3      albedo = { 0.8f, 0.8f, 0.8f };
+    float3      emission = { 0.f,  0.f,  0.f };
+    float       ior = 1.5f;
+    float       shininess = 32.f;
+    bool        is_glass = false;
+    bool        is_emissive = false;
+
+    struct TexturePaths {
+        std::string ambient_path = "";
+        std::string diffuse_path = "";
+        std::string specular_path = ""; //Red channel: Occlusion, Green channel : Roughness, Blue channel : Metalness
+        std::string bump_path = "";
+        std::string alpha_path = "";
+		std::string emissive_path = "";
+	} texture_paths;
+    //std::string texture_path;
+
+    // Construct from tinyobj material
+    static ObjMaterial from(const tinyobj::material_t& material, const std::string& base_dir);
+};
+
+// One of these per OBJ file
+struct LoadedSceneObject {
+    std::string name;
+
     std::vector<ColoredVertex> vertices;
     std::vector<uint3>         indices;
-    bool                       is_glass = false;
-    float                      ior = 1.0f;
-    std::string                texture_path; // empty = no texture
+    std::vector<uint32_t>      sbt_index_buffer; // one per triangle -> material index
+
+    std::vector<ObjMaterial>   materials;
+
+    // GPU buffers
+    CUdeviceptr d_vertices = 0;
+    CUdeviceptr d_indices = 0;
+    CUdeviceptr d_sbt_indices = 0;
+    CUdeviceptr d_gas_output = 0;
+
+    OptixTraversableHandle gas_handle = 0;
+    uint32_t               sbt_base = 0;
+    float                  transform[12] = { 1,0,0,0, 
+                                             0,1,0,0, 
+                                             0,0,1,0 };
 };
 
-// Merged result: all geometry in one buffer with per-material SBT indexing
-struct MergedObjMesh {
-    std::vector<ColoredVertex> vertices;
-    std::vector<uint3>         indices;
-    std::vector<uint32_t>      sbt_index_buffer;  // sbt_index_buffer[prim_idx] = SBT record index
-
-    struct MaterialInfo {
-        std::string name;
-        float3      color;
-        float       ior;
-        bool        is_glass;
-        std::string texture_path;
-    };
-    std::vector<MaterialInfo> materials;  // materials[i] = info for SBT record i
-};
-
-struct MtlMaterial {
-    float3      kd = { 0.8f, 0.8f, 0.8f };
-    float       ni = 1.0f;
-    int         illum = 2;
-    std::string map_kd = ""; // texture filename, empty if none
-};
-
-inline std::unordered_map<std::string, MtlMaterial> loadMtl(const std::string& path)
+inline std::string resolveTexturePath(
+    const std::string& raw_name,     // what the MTL says, e.g. "wood.png" or "textures/wood.png"
+    const std::string& base_dir)     // base directory to search (e.g., "C:/Users/lukas/OneDrive/Desktop/lumberyard/")
 {
-    std::unordered_map<std::string, MtlMaterial> mats;
-    std::ifstream f(path);
-    if (!f) {
-        std::cerr << "[MTL] Could not open: " << path << std::endl;
-        return mats;
+    // Normalize base_dir to ensure it ends with a separator
+    std::string search_root = base_dir;
+    if (!search_root.empty() && search_root.back() != '/' && search_root.back() != '\\') {
+        search_root += '/';
     }
 
-    std::string line, current;
-    while (std::getline(f, line)) {
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos || line[start] == '#') continue;
-        line = line.substr(start);
+    // Extract just the filename from the raw path
+    std::filesystem::path raw_path(raw_name);
+    std::string filename = raw_path.filename().string();  // e.g., "wood.png"
 
-        std::istringstream ss(line);
-        std::string tok;
-        ss >> tok;
-
-        if (tok == "newmtl") { ss >> current; mats[current] = {}; }
-        else if (tok == "Kd") { ss >> mats[current].kd.x >> mats[current].kd.y >> mats[current].kd.z; }
-        else if (tok == "Ni") { ss >> mats[current].ni; }
-        else if (tok == "illum") { ss >> mats[current].illum; }
-        else if (tok == "map_Kd") { ss >> mats[current].map_kd; }
+    // First, try the exact path as specified (relative to base_dir)
+    std::string exact_attempt = search_root + raw_name;
+    std::error_code ec;
+    auto canonical_exact = std::filesystem::weakly_canonical(exact_attempt, ec);
+    if (!ec && std::filesystem::exists(canonical_exact)) {
+        printf("[Texture] Found at exact path: %s\n", canonical_exact.string().c_str());
+        return canonical_exact.string();
     }
-    return mats;
+
+    // Recursive search: walk through all subdirectories of base_dir looking for the filename
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(search_root)) {
+            if (entry.is_regular_file() && entry.path().filename().string() == filename) {
+                printf("[Texture] Found '%s' at: %s\n", filename.c_str(), entry.path().string().c_str());
+                return entry.path().string();
+            }
+        }
+    }
+    catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "[Texture] Error searching directory: " << e.what() << "\n";
+        return "";
+    }
+
+    // Nothing found
+    printf("[Texture] Cannot resolve: '%s' (searched in '%s' and subdirectories)\n",
+        raw_name.c_str(), search_root.c_str());
+    return "";
 }
 
-inline std::vector<ObjMesh> loadObj(const std::string& obj_path,
-    const std::string& mtl_path)
+// Construct from tinyobj material
+inline ObjMaterial ObjMaterial::from(const tinyobj::material_t& material, const std::string& base_dir)
 {
-    auto materials = loadMtl(mtl_path);
+    ObjMaterial out;
+    out.name = material.name;
+    out.albedo = make_float3(material.diffuse[0], material.diffuse[1], material.diffuse[2]);
+    out.emission = make_float3(material.emission[0], material.emission[1], material.emission[2]);
+    out.shininess = material.shininess > 0.f ? material.shininess : 32.f;
+    out.ior = material.ior > 1.f ? material.ior : 1.5f;
+    out.is_glass = (material.illum == 7) || (material.illum == 9);// || (material.dissolve < 0.99f) || (material.ior > 1.01f);
+    float emit_lum = out.emission.x + out.emission.y + out.emission.z;
+    out.is_emissive = emit_lum > 0.001f || !out.texture_paths.emissive_path.empty();
 
-    std::ifstream f(obj_path);
-    if (!f) throw std::runtime_error("Failed to open OBJ: " + obj_path);
-
-    std::vector<float3> raw_positions;
-    std::vector<float2> raw_uvs;
-
-    struct Corner { float3 pos; float2 uv; };
-    std::unordered_map<std::string, std::vector<Corner>> mat_corners;
-    std::unordered_map<std::string, float3>              mat_color;
-    std::unordered_map<std::string, float>               mat_ior;
-    std::unordered_map<std::string, bool>                mat_glass;
-    std::unordered_map<std::string, std::string>         mat_texture;
-
-    std::string current_mat = "default";
-    std::string line;
-
-    while (std::getline(f, line)) {
-        size_t start = line.find_first_not_of(" \t");
-        if (start == std::string::npos || line[start] == '#') continue;
-        line = line.substr(start);
-
-        std::istringstream ss(line);
-        std::string tok;
-        ss >> tok;
-
-        if (tok == "v") {
-            float x, y, z;
-            ss >> x >> y >> z;
-            raw_positions.push_back(make_float3(x, y, z));
-        }
-        else if (tok == "vt") {
-            float u, v;
-            ss >> u >> v;
-            raw_uvs.push_back(make_float2(u, v));
-        }
-        else if (tok == "usemtl") {
-            ss >> current_mat;
-            if (mat_corners.find(current_mat) == mat_corners.end()) {
-                if (materials.count(current_mat)) {
-                    auto& m = materials[current_mat];
-                    mat_color[current_mat] = m.kd;
-                    mat_ior[current_mat] = m.ni;
-                    mat_glass[current_mat] = (m.illum == 3 || m.ni > 1.01f);
-                    mat_texture[current_mat] = m.map_kd;
-                }
-                else {
-                    mat_color[current_mat] = make_float3(0.8f, 0.8f, 0.8f);
-                    mat_ior[current_mat] = 1.0f;
-                    mat_glass[current_mat] = false;
-                    mat_texture[current_mat] = "";
-                }
-            }
-        }
-        else if (tok == "f") {
-            std::vector<Corner> face_corners;
-            std::string vtok;
-            while (ss >> vtok) {
-                Corner c;
-                c.uv = make_float2(0.0f, 0.0f);
-
-                size_t s1 = vtok.find('/');
-                int vi = std::stoi(vtok.substr(0, s1));
-                if (vi < 0) vi = (int)raw_positions.size() + vi + 1;
-                c.pos = raw_positions[vi - 1];
-
-                if (s1 != std::string::npos) {
-                    size_t s2 = vtok.find('/', s1 + 1);
-                    std::string vt_str = vtok.substr(s1 + 1,
-                        s2 == std::string::npos ? std::string::npos : s2 - s1 - 1);
-                    if (!vt_str.empty() && !raw_uvs.empty()) {
-                        int vti = std::stoi(vt_str);
-                        if (vti < 0) vti = (int)raw_uvs.size() + vti + 1;
-                        c.uv = raw_uvs[vti - 1];
-                    }
-                }
-                face_corners.push_back(c);
-            }
-
-            for (int i = 1; i + 1 < (int)face_corners.size(); i++) {
-                mat_corners[current_mat].push_back(face_corners[0]);
-                mat_corners[current_mat].push_back(face_corners[i]);
-                mat_corners[current_mat].push_back(face_corners[i + 1]);
-            }
-        }
+    if (!material.ambient_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.ambient_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.ambient_path = resolved;
     }
-
-    std::string asset_dir = obj_path.substr(0, obj_path.find_last_of("/\\") + 1);
-
-    std::vector<ObjMesh> meshes;
-    for (auto& [mat, corners] : mat_corners) {
-        if (corners.empty()) continue;
-
-        ObjMesh mesh;
-        mesh.material_name = mat;
-        mesh.is_glass = mat_glass.count(mat) ? mat_glass[mat] : false;
-        mesh.ior = mat_ior.count(mat) ? mat_ior[mat] : 1.0f;
-        mesh.texture_path = mat_texture.count(mat) ? mat_texture[mat] : "";
-
-        if (!mesh.texture_path.empty())
-            mesh.texture_path = asset_dir + mesh.texture_path;
-
-        float3 color = mat_color.count(mat) ? mat_color[mat] : make_float3(0.8f, 0.8f, 0.8f);
-
-        // First pass: add vertices and calculate area-weighted normals
-        std::unordered_map<size_t, float3> vertex_normal_accum;
-
-        for (size_t i = 0; i < corners.size(); i += 3) {
-            uint32_t base = (uint32_t)mesh.vertices.size();
-
-            // Get the three positions for this triangle
-            const float3& p0 = corners[i + 0].pos;
-            const float3& p1 = corners[i + 1].pos;
-            const float3& p2 = corners[i + 2].pos;
-
-            // Calculate area-weighted normal using cross product
-            float3 e1 = make_float3(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
-            float3 e2 = make_float3(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z);
-            float3 face_normal = make_float3(
-                e1.y * e2.z - e1.z * e2.y,
-                e1.z * e2.x - e1.x * e2.z,
-                e1.x * e2.y - e1.y * e2.x
-            );
-            // Cross product magnitude is 2 * triangle area, so we get area-weighting for free
-
-            // Add vertices with zero normals (to be filled in next pass)
-            mesh.vertices.push_back({ p0, color, make_float3(0.f, 0.f, 0.f), corners[i + 0].uv });
-            mesh.vertices.push_back({ p1, color, make_float3(0.f, 0.f, 0.f), corners[i + 1].uv });
-            mesh.vertices.push_back({ p2, color, make_float3(0.f, 0.f, 0.f), corners[i + 2].uv });
-            mesh.indices.push_back(make_uint3(base, base + 1, base + 2));
-
-            // Accumulate area-weighted normal to each vertex
-            vertex_normal_accum[base] = vertex_normal_accum[base] + face_normal;
-            vertex_normal_accum[base + 1] = vertex_normal_accum[base + 1] + face_normal;
-            vertex_normal_accum[base + 2] = vertex_normal_accum[base + 2] + face_normal;
-        }
-
-        // Second pass: normalize vertex normals and write back to vertices
-        for (auto& [vertex_idx, normal] : vertex_normal_accum) {
-            float len = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
-            if (len > 1e-6f) {
-                mesh.vertices[vertex_idx].normal = make_float3(
-                    normal.x / len,
-                    normal.y / len,
-                    normal.z / len
-                );
-            }
-            else {
-                // Fallback: use a default normal if accumulation failed
-                mesh.vertices[vertex_idx].normal = make_float3(0.f, 1.f, 0.f);
-            }
-        }
-
-        meshes.push_back(std::move(mesh));
+    if (!material.diffuse_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.diffuse_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.diffuse_path = resolved;
     }
-
-    std::cout << "[OBJ] Loaded " << meshes.size() << " material groups\n";
-    for (auto& m : meshes) {
-        std::cout << "  '" << m.material_name << "': "
-            << m.vertices.size() << " verts, "
-            << m.indices.size() << " tris, "
-            << (m.is_glass ? "GLASS" : "solid")
-            << (m.texture_path.empty() ? "" : " tex=" + m.texture_path)
-            << "\n";
+    if (!material.specular_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.specular_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.specular_path = resolved;
     }
-    return meshes;
+    if (!material.bump_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.bump_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.bump_path = resolved;
+    }
+    if (!material.alpha_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.alpha_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.alpha_path = resolved;
+    }
+    if (!material.emissive_texname.empty()) {
+        std::string resolved = resolveTexturePath(material.emissive_texname, base_dir);
+        if (!resolved.empty())
+            out.texture_paths.emissive_path = resolved;
+    }
+    //// In ObjMaterial::from():
+    //if (!material.diffuse_texname.empty()) {
+    //    std::string resolved = resolveTexturePath(material.diffuse_texname, base_dir);
+    //    if (!resolved.empty())
+    //        out.texture_path = resolved;  // store the resolved path
+    //}
+
+    return out;
 }
 
-// ------------------------------------------------------------------
-// Merge all ObjMeshes into one flat buffer with per-material SBT indexing.
-// SBT records are assigned in the order materials appear in the ObjMesh vector.
-// ------------------------------------------------------------------
-inline MergedObjMesh mergeObjMeshes(const std::vector<ObjMesh>& meshes)
+inline void loadTextureFromFile(const std::string& path)
 {
-    MergedObjMesh result;
+    if (path.empty()) return;
 
-    for (uint32_t mat_idx = 0; mat_idx < meshes.size(); ++mat_idx) {
-        const auto& mesh = meshes[mat_idx];
+    int w, h, ch;
+    // Force 4 channels (RGBA) for consistent upload
+    unsigned char* data = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!data) {
+        std::cerr << "[TEX] Failed to load: " << path
+            << " — " << stbi_failure_reason() << "\n";
+        return;
+    }
+    //std::cout << "[TEX] Loaded " << path << " (" << w << "x" << h << ")\n";
+}
 
-        // Record material info for SBT
-        MergedObjMesh::MaterialInfo mat_info;
-        mat_info.name = mesh.material_name;
-        mat_info.color = mesh.vertices.empty() ? make_float3(1.0f, 0.0f, 1.0f)
-            : mesh.vertices[0].color;
-        mat_info.ior = mesh.ior;
-        mat_info.is_glass = mesh.is_glass;
-        mat_info.texture_path = mesh.texture_path;
-        result.materials.push_back(mat_info);
 
-        // Merge vertices and indices, assigning SBT record index
-        uint32_t vertex_base = (uint32_t)result.vertices.size();
-        for (const auto& v : mesh.vertices) {
-            result.vertices.push_back(v);
+inline void computeSmoothNormals(LoadedSceneObject& scene_object)
+{
+    // Group vertex indices by position using a spatial hash.
+    // The hash maps position bits to a list of vertex indices at that position.
+    // Vertices at the same world position get the same hash bucket and share normals.
+    auto hashPos = [](float3 p) -> size_t {
+        uint32_t hx, hy, hz;
+        memcpy(&hx, &p.x, 4);
+        memcpy(&hy, &p.y, 4);
+        memcpy(&hz, &p.z, 4);
+        return (size_t)(hx * 2654435761u ^ hy * 805459861u ^ hz * 3674653429u);
+        };
+
+    // Map from position hash -> list of vertex indices sharing that position
+    std::unordered_map<size_t, std::vector<uint32_t>> pos_groups;
+
+    for (uint32_t i = 0; i < (uint32_t)scene_object.vertices.size(); i++)
+        pos_groups[hashPos(scene_object.vertices[i].position)].push_back(i);
+
+    // For each group, sum the face normals (area-weighted via unnormalized cross products)
+    // then normalize the sum and write back to all vertices in the group.
+    for (auto& [hash, group] : pos_groups) {
+        float3 sum = { 0.f, 0.f, 0.f };
+        for (uint32_t vi : group) {
+            const float3& n = scene_object.vertices[vi].normal;
+            sum.x += n.x; sum.y += n.y; sum.z += n.z;
         }
+        float len = sqrtf(sum.x * sum.x + sum.y * sum.y + sum.z * sum.z);
+        float3 smooth = (len > 1e-6f)
+            ? make_float3(sum.x / len, sum.y / len, sum.z / len)
+            : make_float3(0.f, 1.f, 0.f);  // fallback: point up
 
-        for (const auto& tri : mesh.indices) {
-            result.indices.push_back(make_uint3(
-                tri.x + vertex_base, tri.y + vertex_base, tri.z + vertex_base));
+        for (uint32_t vi : group)
+            scene_object.vertices[vi].normal = smooth;
+    }
+}
 
-            //// DIAGNOSTIC: Route textured materials (mat_idx 3, 4) to glass SBT record (1)
-            //uint32_t sbt_idx = mat_idx;
-            //if (!mesh.texture_path.empty()) {
-            //    sbt_idx = 1;  // Point to glass shader (SBT index 1)
-            //}
-            //result.sbt_index_buffer.push_back(sbt_idx);
-            result.sbt_index_buffer.push_back(mat_idx);
+inline LoadedSceneObject loadSceneObject(const std::string& name,
+                                         const std::string& obj_path,
+                                         const std::string& base_dir)
+{
+    tinyobj::ObjReaderConfig reader_config;
+	reader_config.triangulate = true;   // Ensure all faces are triangles for OptiX
+	reader_config.vertex_color = false; // Disable vertex color parsing to save memory if not needed
+	reader_config.mtl_search_path = base_dir; // Set the search path for MTL files to the same directory as the OBJ file
+
+    tinyobj::ObjReader reader; 
+	reader.ParseFromFile(obj_path, reader_config);   // Load OBJ file with the specified configuration
+	if (!reader.Valid()) { // Check if loading was successful
+        throw std::runtime_error("[OBJ] Failed to load '" + obj_path + "': " + reader.Error());
+    }
+	if (!reader.Warning().empty()) // Print any warnings that occurred during loading
+        std::cerr << "[OBJ] Warning: " << reader.Warning() << "\n";
+
+	const auto& attrib = reader.GetAttrib();  // Get vertex attributes (positions, normals, texcoords)
+	const auto& shapes = reader.GetShapes();  // Get shapes (geometry groups) from the OBJ file. Each shape contains a mesh with indices and material IDs.
+	const auto& materials = reader.GetMaterials();  // Get materials from the MTL file. Each material contains properties like diffuse color, specular color, texture paths, etc.
+
+	LoadedSceneObject scene_object;  //Create a new LoadedSceneObject that holds the geometry and material data for data loaded from OBJ file
+	scene_object.name = name;  //Set the name of the scene object
+
+	scene_object.materials.reserve(materials.size());  //Build material list, one entry per loaded material from MTL file
+    for (const auto& mat : materials)
+		scene_object.materials.push_back(ObjMaterial::from(mat, base_dir));  // Convert tinyobj material to our own format and store in scene_object.materials
+
+    // Walk every shape, every face — route directly into flat buffers
+    for (const auto& shape : shapes) {
+        for (size_t face_index = 0; face_index < shape.mesh.num_face_vertices.size(); face_index++) {
+            int mat_id = shape.mesh.material_ids[face_index];
+            if (mat_id < 0 || mat_id >= (int)materials.size()) mat_id = 0;
+
+            uint32_t base = (uint32_t)scene_object.vertices.size();
+
+            for (int v = 0; v < 3; v++) {
+                tinyobj::index_t idx = shape.mesh.indices[face_index * 3 + v];
+                ColoredVertex vert = {};
+
+                int pi = idx.vertex_index * 3;
+                vert.position = make_float3( attrib.vertices[pi + 0], attrib.vertices[pi + 1], attrib.vertices[pi + 2]);
+
+                if (idx.normal_index >= 0) {
+                    int ni = idx.normal_index * 3;
+                    vert.normal = make_float3( attrib.normals[ni + 0], attrib.normals[ni + 1], attrib.normals[ni + 2]);
+                }
+
+                if (idx.texcoord_index >= 0) {
+                    int ti = idx.texcoord_index * 2;
+                    vert.uv = make_float2( attrib.texcoords[ti + 0], 1.f - attrib.texcoords[ti + 1]);
+                }
+
+                //vert.color = scene_object.materials[mat_id].albedo;
+                scene_object.vertices.push_back(vert);
+            }
+
+            scene_object.indices.push_back(make_uint3(base, base + 1, base + 2));
+            // This triangle maps to material mat_id's SBT record
+            scene_object.sbt_index_buffer.push_back((uint32_t)mat_id);
         }
     }
 
-    std::cout << "[MERGE] Total: " << result.vertices.size() << " verts, "
-        << result.indices.size() << " tris, "
-        << result.materials.size() << " materials\n";
-    for (size_t i = 0; i < result.materials.size(); ++i) {
-        const auto& m = result.materials[i];
-        std::cout << "  [SBT " << i << "] '" << m.name << "': "
-            << (m.is_glass ? "GLASS" : "solid")
-            << " color=(" << m.color.x << ", " << m.color.y << ", " << m.color.z << ")"
-            << (m.texture_path.empty() ? "" : " tex=" + m.texture_path)
-            << "\n";
+    for (int i = 0; i < 100; i++) {
+        //printf("[Normal] %d: x %f , y %f , z %f \n", i, scene_object.vertices[i].normal.x, scene_object.vertices[i].normal.y, scene_object.vertices[i].normal.z);
     }
-    return result;
+    
+    //computeSmoothNormals(scene_object);  // TODO Compute smooth normals where absent
+
+    for (int i = 0; i < 100; i++) {
+        //printf("[Normal] %d: x %f , y %f , z %f \n", i, scene_object.vertices[i].normal.x, scene_object.vertices[i].normal.y, scene_object.vertices[i].normal.z);
+    }
+
+    printf("[Scene] '%s': %zu verts, %zu tris, %zu materials\n", name.c_str(), scene_object.vertices.size(), scene_object.indices.size(), scene_object.materials.size());
+
+ //   struct TextureUsage {
+ //       int ambient_texname = 0;             // map_Ka. For ambient or ambient occlusion.
+ //       int diffuse_texname = 0;             // map_Kd
+ //       int specular_texname = 0;            // map_Ks
+ //       int bump_texname = 0;                // map_bump, map_Bump, bump
+ //       int alpha_texname = 0;               // map_d
+ //       int roughness_texname = 0;               // map_Pr
+ //       int metallic_texname = 0;                // map_Pm
+ //       int sheen_texname = 0;                   // map_Ps
+ //       int emissive_texname = 0;                // map_Ke
+ //       int normal_texname = 0;                 // norm. For normal mapping.
+	//} texture_usage;
+
+ //   for (const auto& material: materials) {
+ //       //printf("[Material]'%s', Texture: ambient '%s', diffuse '%s', specular '%s', bump '%s', alpha '%s'\n",
+ //       //    material.name.c_str(),
+ //       //    material.ambient_texname.c_str(),
+ //       //    material.diffuse_texname.c_str(),
+ //       //    material.specular_texname.c_str(),
+ //       //    material.bump_texname.c_str(),
+ //       //    material.alpha_texname.c_str());
+	//	if (!material.ambient_texname.empty()) texture_usage.ambient_texname++;
+	//	if (!material.diffuse_texname.empty()) texture_usage.diffuse_texname++;
+	//	if (!material.specular_texname.empty()) texture_usage.specular_texname++;
+	//	if (!material.bump_texname.empty()) texture_usage.bump_texname++;
+	//	if (!material.alpha_texname.empty()) texture_usage.alpha_texname++;
+ //       if (!material.roughness_texname.empty()) texture_usage.roughness_texname++;
+ //       if (!material.metallic_texname.empty()) texture_usage.metallic_texname++;
+ //       if (!material.sheen_texname.empty()) texture_usage.sheen_texname++;
+ //       if (!material.emissive_texname.empty()) texture_usage.emissive_texname++;
+ //       if (!material.normal_texname.empty()) texture_usage.normal_texname++;
+	//}
+
+ //   for (const auto& material : materials) {
+ //  //     if (!material.ambient_texname.empty())
+	//		////loadTextureFromFile(base_dir + material.ambient_texname);
+	//	 //   loadTextureFromFile(resolveTexturePath(material.ambient_texname, base_dir));
+ //  //     if (!material.diffuse_texname.empty())
+ //  //         //loadTextureFromFile(base_dir + material.diffuse_texname);
+	//		//loadTextureFromFile(resolveTexturePath(material.diffuse_texname, base_dir));
+ //  //     if (!material.specular_texname.empty())
+ //  //         //loadTextureFromFile(base_dir + material.specular_texname);
+	//		//loadTextureFromFile(resolveTexturePath(material.specular_texname, base_dir));
+ //  //     if (!material.bump_texname.empty())
+ //  //         loadTextureFromFile(resolveTexturePath(material.bump_texname, base_dir));
+ //  //     if (!material.alpha_texname.empty())
+ //  //         loadTextureFromFile(resolveTexturePath(material.alpha_texname, base_dir));
+ //       if (!material.emissive_texname.empty())
+ //           loadTextureFromFile(resolveTexturePath(material.emissive_texname, base_dir));
+	//}
+
+	//printf("[Scene] Texture usage: ambient %d, diffuse %d, specular %d, bump %d, alpha %d, roughness %d, metallic %d, sheen %d, emissive %d, normal %d\n",
+	//	texture_usage.ambient_texname,
+	//	texture_usage.diffuse_texname,
+	//	texture_usage.specular_texname,
+	//	texture_usage.bump_texname,
+	//	texture_usage.alpha_texname,
+ //       texture_usage.roughness_texname,
+ //       texture_usage.metallic_texname,
+ //       texture_usage.sheen_texname,
+ //       texture_usage.emissive_texname,
+ //       texture_usage.normal_texname
+
+	//	);
+
+    return scene_object;
 }
 
 // ===================================================================

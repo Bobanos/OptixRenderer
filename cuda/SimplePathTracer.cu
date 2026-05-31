@@ -344,7 +344,7 @@ __device__ float3 evalBlinnPhong(
 // The NEE samples points on the triangulated surface, so a sphere light
 // automatically works correctly once its triangles are in emissive_triangles[].
 // ==========================================================================
-
+/*
 __device__ float3 sampleEmissiveTriangle(int idx, float r1, float r2,
                                           float3& pos_out, float& pdf_area_out)
 {
@@ -360,7 +360,7 @@ __device__ float3 sampleEmissiveTriangle(int idx, float r1, float r2,
 
     return tri.emission;
 }
-
+*/
 // Convert area-measure PDF to solid-angle-measure PDF.
 // Needed for MIS — all PDFs must be in the same measure.
 // pdf_solid = pdf_area * dist^2 / |cos(theta_light)|
@@ -531,6 +531,11 @@ extern "C" __global__ void __closesthit__ch()
         __uint_as_float(optixGetPayload_5()),
         __uint_as_float(optixGetPayload_6()));
 
+    float3 added_light = make_float3(0.f);
+    if (nonZero(sbt->emission)) {
+        added_light = throughput * sbt->emission * params.light_intensity;
+    }
+
     // Per-bounce seed: unique per pixel + frame + depth + hit position
     unsigned int seed = params.random_seed
         ^ (optixGetLaunchIndex().x * 73856093u)
@@ -550,6 +555,7 @@ extern "C" __global__ void __closesthit__ch()
     // NEE: Area lights (emissive triangle meshes)
     // Emissive spheres work here too — they are just many emissive triangles.
     // ------------------------------------------------------------------
+    /*
     for (int li = 0; li < params.num_emissive_triangles; li++) {
         float  pdf_area;
         float3 light_pos;
@@ -576,7 +582,7 @@ extern "C" __global__ void __closesthit__ch()
             direct = direct + w_light * f * Le * NdotL / fmaxf(pdf_sa, 1e-6f);
         }
     }
-
+    */
     // ------------------------------------------------------------------
     // NEE: Envmap (IBL direct lighting via CDF importance sampling)
     // Fires a shadow ray toward a bright envmap direction.
@@ -676,7 +682,7 @@ extern "C" __global__ void __closesthit__ch()
         }
     }
 
-    float3 final_color = direct + indirect * albedo;  // modulate indirect by albedo for energy conservation
+    float3 final_color = direct + indirect * albedo + added_light;  // modulate indirect by albedo for energy conservation
     optixSetPayload_0(__float_as_uint(final_color.x));
     optixSetPayload_1(__float_as_uint(final_color.y));
     optixSetPayload_2(__float_as_uint(final_color.z));
@@ -732,9 +738,9 @@ extern "C" __global__ void __closesthit__glass()
     if (dot(shade_n, ray_dir) > 0.f) shade_n = -shade_n;
 
     // Glass tint from vertex color (fallback to white if unset)
-    float3 glass_tint = sbt->vertices[tri.x].color * b0
-                      + sbt->vertices[tri.y].color * bary.x
-                      + sbt->vertices[tri.z].color * bary.y;
+    float3 glass_tint = sbt->albedo * b0
+                      + sbt->albedo * bary.x
+                      + sbt->albedo * bary.y;
     float tint_lum = 0.2126f*glass_tint.x + 0.7152f*glass_tint.y + 0.0722f*glass_tint.z;
     if (tint_lum < 0.01f) glass_tint = make_float3(1.f);  // uncolored glass = white
 
@@ -745,6 +751,11 @@ extern "C" __global__ void __closesthit__glass()
         __uint_as_float(optixGetPayload_4()),
         __uint_as_float(optixGetPayload_5()),
         __uint_as_float(optixGetPayload_6()));
+
+    float3 added_light = make_float3(0.f);
+    if (nonZero(sbt->emission)) {
+        added_light = throughput * sbt->emission * params.light_intensity;
+    }
 
     unsigned int seed = params.random_seed
         ^ (optixGetLaunchIndex().x * 73856093u)
@@ -759,6 +770,7 @@ extern "C" __global__ void __closesthit__glass()
     // Models the rough surface component of real glass.
     // ------------------------------------------------------------------
     float3 surface_color = make_float3(0.f);
+    /*
     for (int li = 0; li < params.num_lights; li++) {
         if (params.lights[li].type != 1) continue;  // directional lights only
         // position_or_direction stores the direction the light is POINTING (toward scene)
@@ -779,7 +791,7 @@ extern "C" __global__ void __closesthit__glass()
             surface_color = surface_color + params.lights[li].color * F_hl * norm * D * NdotL;
         }
     }
-
+    */
     // ------------------------------------------------------------------
     // Stochastic Fresnel: reflect or refract
     //
@@ -832,7 +844,7 @@ extern "C" __global__ void __closesthit__glass()
         indirect = make_float3(__uint_as_float(p0), __uint_as_float(p1), __uint_as_float(p2));
     }
 
-    float3 final_color = surface_color + indirect * glass_tint;
+    float3 final_color = added_light + surface_color + indirect * glass_tint ;
 
     optixSetPayload_0(__float_as_uint(final_color.x));
     optixSetPayload_1(__float_as_uint(final_color.y));

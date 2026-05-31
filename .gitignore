@@ -60,3 +60,9 @@ Thumbs.db
 # external/imgui/
 # external/glad/
 # external/glm/
+
+
+# ==================================================
+# Lumberyard assets (too large)
+# ==================================================
+assets/lumberyard

@@ -139,3 +139,7 @@ FLOAT3_DEVICE inline float3 exp(const float3& v) {
 FLOAT3_DEVICE inline float3 log(const float3& v) {
     return make_float3(::log(v.x), ::log(v.y), ::log(v.z));
 }
+
+FLOAT3_DEVICE inline bool nonZero(const float3& v) {
+    return (v.x != 0.0f) || (v.y != 0.0f) || (v.z != 0.0f);
+}

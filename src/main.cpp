@@ -226,6 +226,13 @@ private:
 // Main
 // ------------------------------------------------------------------
 int main() {
+    { //TODO TEST BLOCK, REMOVE
+    //loadSceneObject("allied avenger", "assets/6887_allied_avenger.obj", "assets");
+    //loadSceneObject("spitfire", "assets/spitfire/spitfire.obj", "assets/spitfire");
+    //loadSceneObject("Room Interior", "C:/Users/lukas/OneDrive/Desktop/lumberyard/interior.obj", "C:/Users/lukas/OneDrive/Desktop/lumberyard/");
+    //loadSceneObject("Street Exterior","C:/Users/lukas/OneDrive/Desktop/lumberyard/exterior.obj", "C:/Users/lukas/OneDrive/Desktop/lumberyard/");
+    //return 0;
+    }
     // ----------------------------------------------------------
     // Setup OpenGL
     // ----------------------------------------------------------
@@ -256,9 +263,7 @@ int main() {
     glfwSetCursorPosCallback(window, mouse_callback);
     glfwSetScrollCallback(window, scroll_callback);
 
-    // ----------------------------------------------------------
     // Setup Dear ImGui
-    // ----------------------------------------------------------
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -271,18 +276,19 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-        renderer->loadScene(SceneID::ALLIED_AVENGER);
+        //renderer->loadScene(SceneID::ALLIED_AVENGER);
+        //renderer->loadScene(SceneID::STREET);
+		renderer->loadScene(SceneID::SPITFIRE_COMPANY);  //Loads first scene by default, can switch later with renderer->switchScene(SceneID::OTHER_SCENE);
         renderer->setupShaders();
-        renderer->buildAccelerationStructures();
         renderer->setupLighting();
 
         // Create display buffer
         ImGuiDisplayBuffer display(width, height);
 
         // Get initial scene data
-        SceneData initial_scene = SceneManager::getSceneConfig(SceneID::ALLIED_AVENGER);
+        SceneData initial_scene = SceneManager::getSceneConfig(renderer->getCurrentSceneID());
 
-        // Create camera
+        // Camera setup
         CameraController camera_controller(
             initial_scene.camera_position,
             initial_scene.camera_lookat,
@@ -442,8 +448,9 @@ int main() {
 
 			static float env_map_scale = renderer->getParams().envmap.scale;
 			static float env_map_expo = renderer->getParams().envmap.exposure;
-            
 
+            static float light_intensity = renderer->getParams().light_intensity;
+            
             if (g_mouse_captured) {
                 ImGui::BeginDisabled();
             }
@@ -494,6 +501,11 @@ int main() {
                 light_changed = true;
             }
 
+            if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 100.0f, 1.0f)) {
+                renderer->updateLightIntensity(light_intensity);
+                light_changed = true;
+            }
+
             if (light_changed) {
                 renderer->resetAccumulationBuffer(); // Clear accumulation when manually adjusting rotation
             }
@@ -540,33 +552,17 @@ int main() {
 
             ImGui::Begin("Scene Selection");
 
-            static SceneID selected_scene = SceneID::ALLIED_AVENGER;
+            static SceneID selected_scene = renderer->getCurrentSceneID();
 
-            if (ImGui::RadioButton("Allied Avenger", (int*)&selected_scene, (int)SceneID::ALLIED_AVENGER)) {
-                renderer->switchScene(SceneID::ALLIED_AVENGER);
-                // Update camera to new scene's camera position
-                SceneData new_scene = SceneManager::getSceneConfig(SceneID::ALLIED_AVENGER);
-                camera_controller.setPosition(new_scene.camera_position);
-                camera_controller.setLookAt(new_scene.camera_lookat);
-                renderer->resetAccumulationBuffer();
+            for (int i = 0; i < static_cast<int>(SceneID::COUNT); ++i) {
+				SceneData iter_scene = SceneManager::getSceneConfig(static_cast<SceneID>(i));
+                if (ImGui::RadioButton(iter_scene.name.c_str(), (int*)&selected_scene, (int)static_cast<SceneID>(i))) {
+                    renderer->switchScene(static_cast<SceneID>(i));
+					camera_controller.setPosition(iter_scene.camera_position);
+                    camera_controller.setLookAt(iter_scene.camera_lookat);
+                    renderer->resetAccumulationBuffer();
+                }
             }
-            if (ImGui::RadioButton("Geosphere (Furnace Test)", (int*)&selected_scene, (int)SceneID::GEOSPHERE)) {
-                renderer->switchScene(SceneID::GEOSPHERE);
-                // Update camera to new scene's camera position
-                SceneData new_scene = SceneManager::getSceneConfig(SceneID::GEOSPHERE);
-                camera_controller.setPosition(new_scene.camera_position);
-                camera_controller.setLookAt(new_scene.camera_lookat);
-                renderer->resetAccumulationBuffer();
-            }            
-            if (ImGui::RadioButton("Spitfire", (int*)&selected_scene, (int)SceneID::SPITFIRE)) {
-                renderer->switchScene(SceneID::SPITFIRE);
-                // Update camera to new scene's camera position
-                SceneData new_scene = SceneManager::getSceneConfig(SceneID::SPITFIRE);
-                camera_controller.setPosition(new_scene.camera_position);
-                camera_controller.setLookAt(new_scene.camera_lookat);
-                renderer->resetAccumulationBuffer();
-            }
-
             ImGui::Text("Current: %s", renderer->getCurrentSceneName().c_str());
             ImGui::End();
 
@@ -584,7 +580,7 @@ int main() {
             glfwSwapBuffers(window);
         }
 
-        std::cout << "SUCCESS: OptiX launch completed." << std::endl;
+        std::cout << "SUCCESS: OptiX succesfuly closed." << std::endl;
 
         // Cleanup
         delete renderer;

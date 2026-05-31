@@ -1,0 +1,9 @@
+// 1. Configure TinyOBJ
+#define TINYOBJLOADER_DISABLE_FAST_FLOAT
+#define TINYOBJLOADER_IMPLEMENTATION
+#define TINYOBJLOADER_STREAM_READER_MAX_BYTES 1073741824 
+#include "tiny_obj_loader.h"
+
+// 2. Configure STB_IMAGE
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
