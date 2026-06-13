@@ -16,19 +16,35 @@ FLOAT3_DEVICE inline float3 make_float3(const float a) {
 // ------------------------------------------------------------------
 // Arithmetic Operators
 // ------------------------------------------------------------------
-
+//==========================================================================
 FLOAT3_DEVICE inline float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+FLOAT3_DEVICE inline float3 operator+(const float3& a, float b) {
+    return make_float3(a.x + b, a.y + b, a.z + b);
 }
 
 FLOAT3_DEVICE inline float3 operator+(const float a, const float3& b) {
     return make_float3(a + b.x, a + b.y, a + b.z);
 }
-
+//==========================================================================
 FLOAT3_DEVICE inline float3 operator-(const float3& a, const float3& b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
+FLOAT3_DEVICE inline float3 operator-(const float3& a, float b) {
+    return make_float3(a.x - b, a.y - b, a.z - b);
+}
+
+FLOAT3_DEVICE inline float3 operator-(const float a, const float3& b) {
+    return make_float3(a - b.x, a - b.y, a - b.z);
+}
+
+FLOAT3_DEVICE inline float3 operator-(const float3& a) {
+    return make_float3(-a.x, -a.y, -a.z);
+}
+//==========================================================================
 FLOAT3_DEVICE inline float3 operator*(float t, const float3& v) {
     return make_float3(t * v.x, t * v.y, t * v.z);
 }
@@ -40,7 +56,7 @@ FLOAT3_DEVICE inline float3 operator*(const float3& v, float t) {
 FLOAT3_DEVICE inline float3 operator*(const float3& v, const float3& t) {
     return make_float3(v.x * t.x, v.y * t.y, v.z * t.z);
 }
-
+//==========================================================================
 FLOAT3_DEVICE inline float3 operator/(const float3& v, const float3& t) {
     return make_float3(v.x / t.x, v.y / t.y, v.z / t.z);
 }
@@ -49,17 +65,6 @@ FLOAT3_DEVICE inline float3 operator/(const float3& v, float t) {
     return make_float3(v.x / t, v.y / t, v.z / t);
 }
 
-FLOAT3_DEVICE inline float3 operator+(const float3& v, float t) {
-    return make_float3(v.x + t, v.y + t, v.z + t);
-}
-
-FLOAT3_DEVICE inline float3 operator-(const float3& v, float t) {
-    return make_float3(v.x - t, v.y - t, v.z - t);
-}
-
-FLOAT3_DEVICE inline float3 operator-(const float3& v) {
-    return make_float3(-v.x, -v.y, -v.z);
-}
 
 // ------------------------------------------------------------------
 // Vector Operations

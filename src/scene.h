@@ -13,6 +13,7 @@ enum class SceneID {
     SPITFIRE = 2,
     STREET = 3,
     SPITFIRE_COMPANY = 4,
+    CORNELL_BOX = 5,
     COUNT
 };
 
@@ -63,6 +64,8 @@ public:
 			return getStreetScene();
 		case SceneID::SPITFIRE_COMPANY:
 			return getSpitfireCompanyScene();
+        case SceneID::CORNELL_BOX:
+			return getCornellBoxScene();
         default:
             return getAlliedAvengerScene();
         }
@@ -111,7 +114,7 @@ private:
         obj3.rotation_x = 0.0f;
         obj3.rotation_y = 0.0f;
         obj3.rotation_z = 0.0f;
-        scene.objects.push_back(obj3);  
+        //scene.objects.push_back(obj3);  
 
         scene.envmap_scale = 1.0f;
         scene.envmap_exposure = 0.0f;
@@ -125,8 +128,8 @@ private:
         scene.name = "Geosphere (Furnace Test)";
         scene.envmap_path = "";
 
-        scene.camera_position = make_float3(0.0f, 1.0f, 4.0f);
-        scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+        scene.camera_position = make_float3(0.0f, 0.7f, 2.5f);
+        scene.camera_lookat = make_float3(0.0f, -1.0f, 0.0f);
         scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
         scene.camera_vfov = 60.0f;
 
@@ -151,7 +154,7 @@ private:
         SceneData scene;
         scene.id = SceneID::SPITFIRE;
         scene.name = "Spitfire";
-        scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
+        scene.envmap_path = "assets/moonless_golf_2k.hdr";
 
         scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
         scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
@@ -180,6 +183,8 @@ private:
         scene.id = SceneID::STREET;
         scene.name = "LumberYard Bistro";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
+        scene.camera_position = make_float3(-8.0f, 6.0f, 6.0f);
+        scene.camera_lookat = make_float3(0.0f, -3.0f, 0.0f);
 
         SceneObject street;
         street.name = "Street";
@@ -204,12 +209,32 @@ private:
         scene.name = "Spitfire Company";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
+        scene.camera_position = make_float3(3.0f, 3.0f, 7.5f);
+		scene.camera_lookat = make_float3(0.0f, -1.0f, 0.0f);
+
         SceneObject obj;
 		obj.name = "Spitfire Company";
 		obj.obj_path = "assets/spitfire_company/spitfire_company.obj";
 		obj.base_dir = "assets/spitfire_company";
 		obj.scale = make_float3(0.01f, 0.01f, 0.01f);
         
+        scene.objects.push_back(obj);
+        return scene;
+	}
+
+    static SceneData getCornellBoxScene() {
+        SceneData scene;
+        scene.id = SceneID::CORNELL_BOX;
+        scene.name = "Cornell Box";
+        scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
+        scene.camera_position = make_float3(1.0f, 1.3f, 1.4f);
+
+        SceneObject obj;
+        obj.name = "Cornell Box";
+        obj.obj_path = "assets/cornell_box/cornell-box.obj";
+        obj.base_dir = "assets/cornell_box";
+        obj.scale = make_float3(0.1f, 0.1f, 0.1f);
+
         scene.objects.push_back(obj);
         return scene;
 	}

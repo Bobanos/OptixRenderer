@@ -14,23 +14,10 @@ struct Camera {
 
 struct ColoredVertex {
     float3 position;
-    //float3 color;
     float3 normal;
     float2 uv;
 };
 
-//// Light types: 0 = point light, 1 = directional light
-//struct Light {
-//    float3 position_or_direction;  // position for point light, direction for directional light
-//    float3 color;
-//    int    type;                   // 0 = point, 1 = directional
-//    int    _padding;               // for 16-byte alignment
-//};
-
-//struct EmissiveTriangle {
-//    float3 v0, v1, v2;
-//    float3 emission;        // radiance (can be > 1 for bright lights)
-//};
 
 // Environment map parameters
 struct EnvironmentMap {
@@ -52,22 +39,78 @@ struct Params {
     Camera  camera;
     OptixTraversableHandle traversable;
 
-    //// Flexible light system
-    //Light   lights[4];
-    //int     num_lights;
-
-    //EmissiveTriangle emissive_triangles[8];  // up to 8 area lights
-    //int              num_emissive_triangles;
-
     float   light_intensity;
 
-    int     max_bounce_depth;
+    //int     max_bounce_depth;
     int     samples_per_pixel;
     int     current_sample;
     unsigned int random_seed;
 
     EnvironmentMap envmap;
 };
+
+//===================================================================================================
+
+constexpr unsigned int RAY_TYPE_COUNT = 1;
+
+constexpr OptixPayloadTypeID PAYLOAD_TYPE_RADIANCE = OPTIX_PAYLOAD_TYPE_ID_0;
+
+const unsigned int radiancePayloadSemantics[3] = {
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+};
+//const unsigned int radiancePayloadSemantics[18] =
+//{
+//    // RadiancePRD::attenuation
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+//    // RadiancePRD::seed
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+//    // RadiancePRD::depth
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+//
+//    // RadiancePRD::emitted
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    // RadiancePRD::radiance
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
+//    // RadiancePRD::origin
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    // RadiancePRD::direction
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
+//    // RadiancePRD::done
+//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE
+//};
+
+struct RadiancePRD {
+    float3 radiance;
+};
+
+//struct RadiancePRD
+//{
+//    // these are produced by the caller, passed into trace, consumed/modified by CH and MS and consumed again by the caller after trace returned.
+//    float3       attenuation;
+//    unsigned int seed;
+//    int          depth;
+//
+//    // these are produced by CH and MS, and consumed by the caller after trace returned.
+//    float3       emitted;
+//    float3       radiance;
+//    float3       origin;
+//    float3       direction;
+//    int          done;
+//};
+
+//===================================================================================================
 
 struct RayGenData {};
 
@@ -82,10 +125,12 @@ struct HitGroupDataCommon
 	cudaTextureObject_t emission_texture; // 0 = no texture, use emission color
 };
 
-struct HitGroupDataLambert : public HitGroupDataCommon
+struct HitGroupDataCookTorrance : public HitGroupDataCommon
 {
     cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
-
+    float roughness;
+	float metallic;
+    float3 base_color;
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
@@ -111,5 +156,5 @@ struct VerifyHitGroupLayout {
 };
 
 // Instantiate verification for each hit group type
-template struct VerifyHitGroupLayout<HitGroupDataLambert>;
+template struct VerifyHitGroupLayout<HitGroupDataCookTorrance>;
 template struct VerifyHitGroupLayout<HitGroupDataGlass>;

@@ -25,6 +25,11 @@ struct ObjMaterial {
     bool        is_glass = false;
     bool        is_emissive = false;
 
+
+    float roughness  = 0.0f;
+    float metallic   = 0.0f;
+    float3 base_color = { 0.8f, 0.8f, 0.8f };
+
     struct TexturePaths {
         std::string ambient_path = "";
         std::string diffuse_path = "";
@@ -33,7 +38,7 @@ struct ObjMaterial {
         std::string alpha_path = "";
 		std::string emissive_path = "";
 	} texture_paths;
-    //std::string texture_path;
+
 
     // Construct from tinyobj material
     static ObjMaterial from(const tinyobj::material_t& material, const std::string& base_dir);
@@ -114,7 +119,7 @@ inline ObjMaterial ObjMaterial::from(const tinyobj::material_t& material, const 
     out.emission = make_float3(material.emission[0], material.emission[1], material.emission[2]);
     out.shininess = material.shininess > 0.f ? material.shininess : 32.f;
     out.ior = material.ior > 1.f ? material.ior : 1.5f;
-    out.is_glass = (material.illum == 7) || (material.illum == 9);// || (material.dissolve < 0.99f) || (material.ior > 1.01f);
+    out.is_glass = (material.illum == 4) || (material.illum == 6) || (material.illum == 7) || (material.illum == 9);// || (material.dissolve < 0.99f) || (material.ior > 1.01f);
     float emit_lum = out.emission.x + out.emission.y + out.emission.z;
     out.is_emissive = emit_lum > 0.001f || !out.texture_paths.emissive_path.empty();
 
@@ -148,12 +153,25 @@ inline ObjMaterial ObjMaterial::from(const tinyobj::material_t& material, const 
         if (!resolved.empty())
             out.texture_paths.emissive_path = resolved;
     }
-    //// In ObjMaterial::from():
-    //if (!material.diffuse_texname.empty()) {
-    //    std::string resolved = resolveTexturePath(material.diffuse_texname, base_dir);
-    //    if (!resolved.empty())
-    //        out.texture_path = resolved;  // store the resolved path
-    //}
+
+    if (material.roughness > 0.0f)          //if Pr present
+        out.roughness = material.roughness;
+    else
+		out.roughness = sqrtf(2.f / (material.shininess + 2.f)); // Convert from Phong shininess to roughness (not exact but a common approximation)
+
+
+
+
+    out.metallic = material.metallic;      // Pm if present
+    if (out.metallic <= 0.0f) {            // If no Pm, guess metallic based on specular color intensity
+        float kd_lum = 0.2126f * material.diffuse[0] + 0.7152f * material.diffuse[1] + 0.0722f * material.diffuse[2];
+        float ks_lum = 0.2126f * material.specular[0] + 0.7152f * material.specular[1] + 0.0722f * material.specular[2];
+        out.metallic = (kd_lum < 0.04f && ks_lum > 0.5f) ? 1.0f : 0.0f;
+	}
+
+    out.base_color = out.metallic > 0.5f
+        ? make_float3(material.specular[0], material.specular[1], material.specular[2])
+        : make_float3(material.diffuse[0], material.diffuse[1], material.diffuse[2]);
 
     return out;
 }

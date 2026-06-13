@@ -16,6 +16,7 @@ public:
     Camera getCameraData() const;// Returns Camera struct (from optix_params.h) for OptiX
 
     float3 getPosition() const { return position; }
+    float3 getLookAt() const { return look_at; }
     float getSpeed() const { return movement_speed; }
 
 	void setPosition(const float3& new_position) { position = new_position; updateCameraVectors(); }

@@ -18,7 +18,7 @@ struct Record
 
 typedef Record<RayGenData>   RayGenRecord;
 typedef Record<MissData>     MissRecord;
-typedef Record<HitGroupDataLambert> HitGroupRecordLambert;
+typedef Record<HitGroupDataCookTorrance> HitGroupRecordCookTorrance;
 typedef Record<HitGroupDataGlass> HitGroupRecordGlass;
 
 
@@ -248,15 +248,23 @@ void OptixRenderer::uploadSceneObject(LoadedSceneObject& obj)
 }
 
 void OptixRenderer::createModuleAndProgramGroups() {
-    auto optix_ir = loadFile("generated/optixir/SimplePathTracer.optixir");
+    //auto optix_ir = loadFile("generated/optixir/SimplePathTracer.optixir");
+    auto optix_ir = loadFile("generated/optixir/PathTracer.optixir");
+
+    OptixPayloadType payloadType = {};
+    // radiance prd
+    payloadType.numPayloadValues = sizeof(radiancePayloadSemantics) / sizeof(radiancePayloadSemantics[0]);
+    payloadType.payloadSemantics = radiancePayloadSemantics;
 
     OptixModuleCompileOptions module_compile_options = {};
     module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
 
+	module_compile_options.numPayloadTypes = 1;
+	module_compile_options.payloadTypes = &payloadType;
+
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
-    pipeline_compile_options.numPayloadValues = 7;
     pipeline_compile_options.numAttributeValues = 2;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
@@ -279,32 +287,34 @@ void OptixRenderer::createModuleAndProgramGroups() {
 
     DEBUG_LOGF("[OptiX] Module created, params size: %d", sizeof(Params));
 
+    OptixProgramGroupOptions pg_opts = {};
+
     // Create program groups
     OptixProgramGroupDesc descriptor_raygen = {};
     descriptor_raygen.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     descriptor_raygen.raygen.module = module;
-    descriptor_raygen.raygen.entryFunctionName = "__raygen__rg";
+    //descriptor_raygen.raygen.entryFunctionName = "__raygen__rg";
+    descriptor_raygen.raygen.entryFunctionName = "__raygen__pathTracer";
+    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_raygen, 1, &pg_opts, log, &logSize, &raygen_program_group));
 
     OptixProgramGroupDesc descriptor_miss = {};
     descriptor_miss.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
     descriptor_miss.miss.module = module;
-    descriptor_miss.miss.entryFunctionName = "__miss__ms";
+    descriptor_miss.miss.entryFunctionName = "__miss__envMap";
+    //descriptor_miss.miss.entryFunctionName = "__miss__ms";
+    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_miss, 1, &pg_opts, log, &logSize, &miss_program_group));
 
-    OptixProgramGroupDesc descriptor_hitgroup_lambert = {};
-    descriptor_hitgroup_lambert.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    descriptor_hitgroup_lambert.hitgroup.moduleCH = module;
-    descriptor_hitgroup_lambert.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    OptixProgramGroupDesc descriptor_hitgroup_cooktorrance = {};
+    descriptor_hitgroup_cooktorrance.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    descriptor_hitgroup_cooktorrance.hitgroup.moduleCH = module;
+    descriptor_hitgroup_cooktorrance.hitgroup.entryFunctionNameCH = "__closesthit__cookTorrance";
+    //descriptor_hitgroup_cooktorrance.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_hitgroup_cooktorrance, 1, &pg_opts, log, &logSize, &hitgroup_cooktorrance_program_group));
 
     OptixProgramGroupDesc descriptor_hitgroup_glass = {};
     descriptor_hitgroup_glass.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descriptor_hitgroup_glass.hitgroup.moduleCH = module;
     descriptor_hitgroup_glass.hitgroup.entryFunctionNameCH = "__closesthit__glass";
-
-    OptixProgramGroupOptions pg_opts = {};
-
-    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_raygen, 1, &pg_opts, log, &logSize, &raygen_program_group));
-    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_miss, 1, &pg_opts, log, &logSize, &miss_program_group));
-    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_hitgroup_lambert, 1, &pg_opts, log, &logSize, &hitgroup_lambert_program_group));
     OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_hitgroup_glass, 1, &pg_opts, log, &logSize, &hitgroup_glass_program_group));
 
     DEBUG_LOG("[OptiX] Program groups created");
@@ -314,12 +324,13 @@ void OptixRenderer::createPipeline() {
     OptixProgramGroup groups[] = { 
         raygen_program_group, 
         miss_program_group, 
-        hitgroup_lambert_program_group, 
+        hitgroup_cooktorrance_program_group, 
         hitgroup_glass_program_group 
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
-    pipeline_link_options.maxTraceDepth = 8;
+    //pipeline_link_options.maxTraceDepth = 7;
+    pipeline_link_options.maxTraceDepth = 2;
 
     char log[4096];
     size_t logSize = sizeof(log);
@@ -327,7 +338,8 @@ void OptixRenderer::createPipeline() {
     OPTIX_CHECK(optixPipelineCreate(
         context, 
         &pipeline_compile_options, 
-        &pipeline_link_options, groups,
+        &pipeline_link_options, 
+        groups,
         4, 
         log, 
         &logSize, 
@@ -340,7 +352,15 @@ void OptixRenderer::createPipeline() {
 // Build single GAS with 1 build input and SbtIndexOffsetBuffer
 // ------------------------------------------------------------------
 void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
-    std::vector<uint32_t> geometryFlags(object.materials.size(), OPTIX_GEOMETRY_FLAG_NONE);
+    std::vector<uint32_t> geometryFlags(object.materials.size());
+
+	for (size_t i = 0; i < object.materials.size(); ++i) {  // Set flag to disable any-hit shader for materials without alpha texture, no flags for the rest 
+        if (object.materials[i].texture_paths.alpha_path.empty()) {
+            geometryFlags[i] = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
+            continue;
+        }
+        geometryFlags[i] = OPTIX_GEOMETRY_FLAG_NONE;
+    }
 
 	OptixBuildInput build_input = {};
 	build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
@@ -463,11 +483,11 @@ void OptixRenderer::buildIAS() {
 
 // ----------------------------------------------------------
 // SBT — one record per material
-// Each record points to either HitGroupDataLambert or HitGroupDataGlass
+// Each record points to either HitGroupRecordCookTorrance or HitGroupDataGlass
 // ----------------------------------------------------------
 void OptixRenderer::buildSBT() {
-    const size_t max_stride = (sizeof(HitGroupRecordLambert) > sizeof(HitGroupRecordGlass))
-        ? sizeof(HitGroupRecordLambert) : sizeof(HitGroupRecordGlass);
+    const size_t max_stride = (sizeof(HitGroupRecordCookTorrance) > sizeof(HitGroupRecordGlass))
+        ? sizeof(HitGroupRecordCookTorrance) : sizeof(HitGroupRecordGlass);
 
     // Count total materials first
     size_t total_materials = 0;
@@ -503,8 +523,8 @@ void OptixRenderer::buildSBT() {
                 ++hit_record_count;
             }
             else {
-                HitGroupRecordLambert record;
-                OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_lambert_program_group, &record));
+                HitGroupRecordCookTorrance record;
+                OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_cooktorrance_program_group, &record));
                 record.data.vertices = (ColoredVertex*)scene_object.d_vertices; // Set vertex buffer pointer for this record to the vertex buffer of the corresponding scene object
                 record.data.indices = (uint3*)scene_object.d_indices; // Set index buffer pointer for this record to the index buffer of the corresponding scene object
                 record.data.albedo = material.albedo; // Set albedo color for lambert material in this record
@@ -522,8 +542,12 @@ void OptixRenderer::buildSBT() {
 					record.data.emission_texture = 0; // If no emission texture, set texture handle to 0
                 }
 
+                record.data.roughness = material.roughness;
+                record.data.metallic  = material.metallic;
+                record.data.base_color = material.base_color;
+
                 hit_records.resize(hit_records.size() + max_stride);
-                std::memcpy(hit_records.data() + sbt_index * max_stride, &record, sizeof(HitGroupRecordLambert));
+                std::memcpy(hit_records.data() + sbt_index * max_stride, &record, sizeof(HitGroupRecordCookTorrance));
                 ++hit_record_count;
             }
         }
@@ -578,8 +602,8 @@ void OptixRenderer::setupLighting() {
 
     // Path tracer settings
     params.light_intensity = 1.f;
-    params.max_bounce_depth = 4;   // Start with x bounces
-    params.samples_per_pixel = 2;  // Progressive sampling
+    //params.max_bounce_depth = 4;   // Start with x bounces
+    params.samples_per_pixel = 1;  // Progressive sampling
     params.current_sample = 0;
     params.random_seed = 1415;
 
@@ -607,8 +631,16 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
-    OPTIX_CHECK(optixLaunch(pipeline, 0, device_buffers.d_params, sizeof(Params), &sbt,
-        params.width, params.height, 1));
+    OPTIX_CHECK(optixLaunch(
+        pipeline, 
+        0, 
+        device_buffers.d_params, 
+        sizeof(Params), 
+        &sbt,
+        params.width, 
+        params.height, 
+        1)
+    );
 
     CUDA_CHECK(cudaDeviceSynchronize());
 

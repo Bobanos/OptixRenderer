@@ -80,7 +80,7 @@ public:
     SceneData getCurrentSceneData() const { return current_scene_data; }
 
     // Parameter updates
-    void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
+    //void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
     void setSamplesPerPixel(int spp) { params.samples_per_pixel = spp; }
     void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
 
@@ -110,7 +110,7 @@ private:
     // Program groups
     OptixProgramGroup raygen_program_group = nullptr;
     OptixProgramGroup miss_program_group = nullptr;
-    OptixProgramGroup hitgroup_lambert_program_group = nullptr;
+    OptixProgramGroup hitgroup_cooktorrance_program_group = nullptr;
     OptixProgramGroup hitgroup_glass_program_group = nullptr;
 
     // Acceleration structures

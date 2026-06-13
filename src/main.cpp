@@ -13,8 +13,6 @@
 #include <cassert>
 
 #include <chrono>
-//#include <sstream>
-//#include <iomanip>
 #include <filesystem>
 
 #include "renderer.h"
@@ -47,7 +45,7 @@ struct Record
 
 typedef Record<RayGenData>   RayGenRecord;
 typedef Record<MissData>     MissRecord;
-typedef Record<HitGroupDataLambert> HitGroupRecordLambert;
+typedef Record<HitGroupDataCookTorrance> HitGroupRecordCookTorrance;
 typedef Record<HitGroupDataGlass> HitGroupRecordGlass;
 
 // Global renderer instance
@@ -226,13 +224,6 @@ private:
 // Main
 // ------------------------------------------------------------------
 int main() {
-    { //TODO TEST BLOCK, REMOVE
-    //loadSceneObject("allied avenger", "assets/6887_allied_avenger.obj", "assets");
-    //loadSceneObject("spitfire", "assets/spitfire/spitfire.obj", "assets/spitfire");
-    //loadSceneObject("Room Interior", "C:/Users/lukas/OneDrive/Desktop/lumberyard/interior.obj", "C:/Users/lukas/OneDrive/Desktop/lumberyard/");
-    //loadSceneObject("Street Exterior","C:/Users/lukas/OneDrive/Desktop/lumberyard/exterior.obj", "C:/Users/lukas/OneDrive/Desktop/lumberyard/");
-    //return 0;
-    }
     // ----------------------------------------------------------
     // Setup OpenGL
     // ----------------------------------------------------------
@@ -276,8 +267,6 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-        //renderer->loadScene(SceneID::ALLIED_AVENGER);
-        //renderer->loadScene(SceneID::STREET);
 		renderer->loadScene(SceneID::SPITFIRE_COMPANY);  //Loads first scene by default, can switch later with renderer->switchScene(SceneID::OTHER_SCENE);
         renderer->setupShaders();
         renderer->setupLighting();
@@ -297,18 +286,6 @@ int main() {
             (float)width / (float)height
         );
         g_camera = &camera_controller;
-
-        //// ----------------------------------------------------------
-        //// Ship transform state
-        //// ----------------------------------------------------------
-        //float ship_rotation_x = initial_scene.object_rotation_x;
-        //float ship_rotation_y = initial_scene.object_rotation_y;
-        //float ship_rotation_z = initial_scene.object_rotation_z;
-        //bool  auto_rotate = false;
-        //float rotation_speed = 1.0f;
-
-        //// Update initial transform
-        //renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
 
         // Timing
         float deltaTime = 0.0f;
@@ -336,27 +313,7 @@ int main() {
             // Input processing
             processInput(window, deltaTime);
 
-   //         // Update ship rotation
-   //         if (auto_rotate)
-   //             ship_rotation_y += rotation_speed * DEG2RAD * deltaTime;
-
-   //         // Only update transform if rotation changed
-   //         static float last_rotation_x = 0.0f;
-   //         static float last_rotation_y = 0.0f;
-   //         static float last_rotation_z = 0.0f;
-
-   //         bool rotation_changed = (ship_rotation_x != last_rotation_x) ||
-   //             (ship_rotation_y != last_rotation_y) ||
-   //             (ship_rotation_z != last_rotation_z);
-
 			bool light_changed = false; 
-
-   //         if (rotation_changed) {
-   //             renderer->updateShipTransform(ship_rotation_x, ship_rotation_y, ship_rotation_z);
-   //             last_rotation_x = ship_rotation_x;
-   //             last_rotation_y = ship_rotation_y;
-   //             last_rotation_z = ship_rotation_z;
-   //         }
 
             {
 				renderer->updateCamera(camera_controller.getCameraData());
@@ -387,6 +344,9 @@ int main() {
 
             float3 pos = camera_controller.getPosition();
             ImGui::Text("Position: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+            //float3 look = camera_controller.getLookAt();
+            float3 look = g_camera->getLookAt();
+            ImGui::Text("LookAt: (%.2f, %.2f, %.2f)", look.x, look.y, look.z);
             ImGui::Text("Speed: %.2f", camera_controller.getSpeed());
 
             ImGui::Separator();
@@ -516,40 +476,6 @@ int main() {
 
             ImGui::End();
 
-            //// Ship Controls window
-            //ImGui::Begin("Scene Objects");
-
-            //int obj_count = renderer->getObjectCount();
-            //for (int i = 0; i < obj_count; ++i) {
-            //    if (ImGui::TreeNode((const char*)nullptr, "Object %d: %s", i, renderer->getCurrentSceneData().objects[i].name.c_str())) {
-            //        float rx_deg, ry_deg, rz_deg;
-            //        renderer->getObjectRotation(i, rx_deg, ry_deg, rz_deg);
-            //        rx_deg *= RAD2DEG;
-            //        ry_deg *= RAD2DEG;
-            //        rz_deg *= RAD2DEG;
-
-            //        bool obj_changed = false;
-            //        if (ImGui::SliderFloat(("Rotation X##" + std::to_string(i)).c_str(), &rx_deg, -180.0f, 180.0f)) {
-            //            obj_changed = true;
-            //        }
-            //        if (ImGui::SliderFloat(("Rotation Y##" + std::to_string(i)).c_str(), &ry_deg, -180.0f, 180.0f)) {
-            //            obj_changed = true;
-            //        }
-            //        if (ImGui::SliderFloat(("Rotation Z##" + std::to_string(i)).c_str(), &rz_deg, -180.0f, 180.0f)) {
-            //            obj_changed = true;
-            //        }
-
-            //        if (obj_changed) {
-            //            renderer->updateObjectTransform(i, rx_deg * DEG2RAD, ry_deg * DEG2RAD, rz_deg * DEG2RAD);
-            //            renderer->resetAccumulationBuffer();
-            //        }
-
-            //        ImGui::TreePop();
-            //    }
-            //}
-
-            //ImGui::End();
-
             ImGui::Begin("Scene Selection");
 
             static SceneID selected_scene = renderer->getCurrentSceneID();
@@ -578,9 +504,28 @@ int main() {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
             glfwSwapBuffers(window);
+
+
+            /* here i can benchmark
+            // Ensure screenshots directory exists
+            std::filesystem::create_directories("screenshots");
+
+            // Get current scene name for filename
+            std::string scene_name = renderer->getCurrentSceneName();
+            // Replace spaces with underscores
+            std::replace(scene_name.begin(), scene_name.end(), ' ', '_');
+
+            // Generate timestamped filename
+            std::string filename = generateScreenshotFilename(scene_name);
+            std::vector<uchar4> pixel_data(width * height);
+            CUDA_CHECK(cudaMemcpy(pixel_data.data(), renderer->getPixelBuffer(),
+                width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
+            saveScreenshot(pixel_data.data(), width, height, filename);
+            glfwSetWindowShouldClose(window, true);
+            */
         }
 
-        std::cout << "SUCCESS: OptiX succesfuly closed." << std::endl;
+        std::cout << "SUCCESS: OptiX succesfuly completed." << std::endl;
 
         // Cleanup
         delete renderer;
