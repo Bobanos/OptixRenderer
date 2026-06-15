@@ -267,7 +267,7 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-		renderer->loadScene(SceneID::SPITFIRE_COMPANY);  //Loads first scene by default, can switch later with renderer->switchScene(SceneID::OTHER_SCENE);
+		renderer->loadScene(SceneID::SPITFIRE_COMPANY);
         renderer->setupShaders();
         renderer->setupLighting();
 
@@ -413,41 +413,6 @@ int main() {
             
             if (g_mouse_captured) {
                 ImGui::BeginDisabled();
-            }
-
-            // Point Light 1
-            ImGui::Text("Point Light 1 (Red)");
-            if (ImGui::DragFloat3("Light 1 Position", light0_pos, 0.1f, -20.0f, 20.0f)) {
-				renderer->updateLightParametersPos(0, make_float3(light0_pos[0], light0_pos[1], light0_pos[2]));
-				light_changed = true;
-            }
-            if (ImGui::ColorEdit3("Light 1 Color", light0_col)) {
-                renderer->updateLightParametersColor(0, make_float3(light0_col[0], light0_col[1], light0_col[2]));
-                light_changed = true;
-            }
-            ImGui::Separator();
-
-            // Point Light 2
-            ImGui::Text("Point Light 2 (Blue)");
-            if (ImGui::DragFloat3("Light 2 Position", light1_pos, 0.1f, -20.0f, 20.0f)) {
-				renderer->updateLightParametersPos(1, make_float3(light1_pos[0], light1_pos[1], light1_pos[2]));
-                light_changed = true;
-            }
-            if (ImGui::ColorEdit3("Light 2 Color", light1_col)) {
-				renderer->updateLightParametersColor(1, make_float3(light1_col[0], light1_col[1], light1_col[2]));
-                light_changed = true;
-            }
-            ImGui::Separator();
-
-            // Directional Light
-            ImGui::Text("Directional Light");
-            if (ImGui::DragFloat3("Light 3 Direction", light2_dir, 0.05f, 100.0f, 1.0f)) {
-				renderer->updateLightParametersPos(2, normalize(make_float3(light2_dir[0], light2_dir[1], light2_dir[2])));
-                light_changed = true;
-            }
-            if (ImGui::ColorEdit3("Light 3 Color", light2_col)) {
-				renderer->updateLightParametersColor(2, make_float3(light2_col[0], light2_col[1], light2_col[2]));
-                light_changed = true;
             }
 
             ImGui::Text("Enviromental Map Settings");

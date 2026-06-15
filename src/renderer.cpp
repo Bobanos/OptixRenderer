@@ -251,21 +251,14 @@ void OptixRenderer::createModuleAndProgramGroups() {
     //auto optix_ir = loadFile("generated/optixir/SimplePathTracer.optixir");
     auto optix_ir = loadFile("generated/optixir/PathTracer.optixir");
 
-    OptixPayloadType payloadType = {};
-    // radiance prd
-    payloadType.numPayloadValues = sizeof(radiancePayloadSemantics) / sizeof(radiancePayloadSemantics[0]);
-    payloadType.payloadSemantics = radiancePayloadSemantics;
-
     OptixModuleCompileOptions module_compile_options = {};
     module_compile_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
     module_compile_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
 
-	module_compile_options.numPayloadTypes = 1;
-	module_compile_options.payloadTypes = &payloadType;
-
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.numAttributeValues = 2;
+    pipeline_compile_options.numPayloadValues = 18;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
     pipeline_compile_options.pipelineLaunchParamsSizeInBytes = sizeof(Params);
@@ -293,7 +286,6 @@ void OptixRenderer::createModuleAndProgramGroups() {
     OptixProgramGroupDesc descriptor_raygen = {};
     descriptor_raygen.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     descriptor_raygen.raygen.module = module;
-    //descriptor_raygen.raygen.entryFunctionName = "__raygen__rg";
     descriptor_raygen.raygen.entryFunctionName = "__raygen__pathTracer";
     OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_raygen, 1, &pg_opts, log, &logSize, &raygen_program_group));
 
@@ -301,14 +293,14 @@ void OptixRenderer::createModuleAndProgramGroups() {
     descriptor_miss.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
     descriptor_miss.miss.module = module;
     descriptor_miss.miss.entryFunctionName = "__miss__envMap";
-    //descriptor_miss.miss.entryFunctionName = "__miss__ms";
     OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_miss, 1, &pg_opts, log, &logSize, &miss_program_group));
 
     OptixProgramGroupDesc descriptor_hitgroup_cooktorrance = {};
     descriptor_hitgroup_cooktorrance.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descriptor_hitgroup_cooktorrance.hitgroup.moduleCH = module;
     descriptor_hitgroup_cooktorrance.hitgroup.entryFunctionNameCH = "__closesthit__cookTorrance";
-    //descriptor_hitgroup_cooktorrance.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+	descriptor_hitgroup_cooktorrance.hitgroup.moduleAH = module;
+	descriptor_hitgroup_cooktorrance.hitgroup.entryFunctionNameAH = "__anyhit__opacity";
     OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_hitgroup_cooktorrance, 1, &pg_opts, log, &logSize, &hitgroup_cooktorrance_program_group));
 
     OptixProgramGroupDesc descriptor_hitgroup_glass = {};
@@ -508,7 +500,7 @@ void OptixRenderer::buildSBT() {
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_program_group, &record));
                 record.data.vertices = (ColoredVertex*)scene_object.d_vertices; // Set vertex buffer pointer for this record to the vertex buffer of the corresponding scene object
                 record.data.indices = (uint3*)scene_object.d_indices; // Set index buffer pointer for this record to the index buffer of the corresponding scene object
-                record.data.albedo = material.albedo; // Set albedo color for lambert material in this record
+                record.data.tint = material.albedo; // Set albedo color for lambert material in this record
                 record.data.emission = material.emission; // Set emission color for this material
                 if (!material.texture_paths.emissive_path.empty()) {
                     record.data.emission_texture = loadTextureCached(material.texture_paths.emissive_path); // Load the emission texture for this material and set the texture handle in the record
@@ -527,14 +519,16 @@ void OptixRenderer::buildSBT() {
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_cooktorrance_program_group, &record));
                 record.data.vertices = (ColoredVertex*)scene_object.d_vertices; // Set vertex buffer pointer for this record to the vertex buffer of the corresponding scene object
                 record.data.indices = (uint3*)scene_object.d_indices; // Set index buffer pointer for this record to the index buffer of the corresponding scene object
-                record.data.albedo = material.albedo; // Set albedo color for lambert material in this record
+                record.data.base_color = material.base_color; // Set base color for Cook-Torrance material in this record
                 record.data.emission = material.emission; // Set emission color for this material
+
                 if (!material.texture_paths.diffuse_path.empty()) {
 					record.data.albedo_texture = loadTextureCached(material.texture_paths.diffuse_path); // Load the diffuse texture for this material and set the texture handle in the record
                 }
                 else {
 					record.data.albedo_texture = 0; // If no diffuse texture, set texture handle to 0
                 }
+
                 if (!material.texture_paths.emissive_path.empty()) {
 					record.data.emission_texture = loadTextureCached(material.texture_paths.emissive_path); // Load the emission texture for this material and set the texture handle in the record
                 }
@@ -542,9 +536,22 @@ void OptixRenderer::buildSBT() {
 					record.data.emission_texture = 0; // If no emission texture, set texture handle to 0
                 }
 
+                if (!material.texture_paths.alpha_path.empty()) { // Adjust to your actual path string name
+                    record.data.alpha_texture = loadTextureCached(material.texture_paths.alpha_path);
+                }
+                else {
+                    record.data.alpha_texture = 0; // 0 means not present / fully opaque material
+                }
+
                 record.data.roughness = material.roughness;
                 record.data.metallic  = material.metallic;
-                record.data.base_color = material.base_color;
+                record.data.specular_color = material.specular;
+
+				record.data.metallic_texture = 0;
+                record.data.roughness_texture = 0;
+                record.data.specular_texture = 0;
+                //record.data.albedo_texture = 0; // TODO REMOVE 
+
 
                 hit_records.resize(hit_records.size() + max_stride);
                 std::memcpy(hit_records.data() + sbt_index * max_stride, &record, sizeof(HitGroupRecordCookTorrance));
@@ -586,23 +593,11 @@ void OptixRenderer::setupShaders() {
 }
 
 void OptixRenderer::setupLighting() {
-    //params.num_lights = 3;
-
-    //params.lights[0].type = 0;
-    //params.lights[0].position_or_direction = make_float3(2.0f, 3.0f, 2.0f);
-    //params.lights[0].color = make_float3(1.0f, 0.4f, 0.4f);
-
-    //params.lights[1].type = 0;
-    //params.lights[1].position_or_direction = make_float3(2.0f, 3.0f, -2.0f);
-    //params.lights[1].color = make_float3(0.4f, 0.4f, 1.0f);
-
-    //params.lights[2].type = 1;
-    //params.lights[2].position_or_direction = normalize(make_float3(0.0f, -1.0f, -0.2f));
-    //params.lights[2].color = make_float3(0.5f, 0.5f, 0.5f);
 
     // Path tracer settings
     params.light_intensity = 1.f;
-    //params.max_bounce_depth = 4;   // Start with x bounces
+    params.max_bounce_depth = 8;   // Start with x bounces
+	params.rr_start_depth = 3;      // Start Russian Roulette after x bounces
     params.samples_per_pixel = 1;  // Progressive sampling
     params.current_sample = 0;
     params.random_seed = 1415;
@@ -647,18 +642,6 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 	params.current_sample++;
 }
 
-void OptixRenderer::updateLightParametersPos(int light_idx, float3 position_or_direction) {
-//    if (light_idx >= 0 && light_idx < params.num_lights) {
-//        params.lights[light_idx].position_or_direction = position_or_direction;
-//    }
-}
-//
-void OptixRenderer::updateLightParametersColor(int light_idx, float3 color) {
-//    if (light_idx >= 0 && light_idx < params.num_lights) {
-//        params.lights[light_idx].color = color;
-//    }
-}
-
 void OptixRenderer::updateEnvmapParameters(float scale, float exposure) {
 	params.envmap.scale = scale;
 	params.envmap.exposure = exposure;
@@ -671,7 +654,6 @@ void OptixRenderer::updateLightIntensity(float light_intensity) {
 void OptixRenderer::resetAccumulationBuffer() {
     if (device_buffers.d_accum_buffer) {
         CUDA_CHECK(cudaMemset((void*)device_buffers.d_accum_buffer, 0, params.width * params.height * sizeof(float3)));
-		//DEBUG_LOG("[Render] Accumulation buffer reset");
     }
 	params.current_sample = 0;
 }
@@ -730,21 +712,7 @@ void OptixRenderer::FreeDeviceBuffers() {
     freeAndNull(device_buffers.d_ms);
 }
 
-//void OptixRenderer::resize(int width, int height) {
-//    params.width = width;
-//    params.height = height;
-//    // Free existing buffers
-//    if (device_buffers.d_pixels) {
-//        CUDA_CHECK(cudaFree((void*)device_buffers.d_pixels));
-//        device_buffers.d_pixels = 0;
-//    }
-//    if (device_buffers.d_accum_buffer) {
-//        CUDA_CHECK(cudaFree((void*)device_buffers.d_accum_buffer));
-//        device_buffers.d_accum_buffer = 0;
-//    }
-//    // New buffers will be allocated on next render call
-//    resetAccumulationBuffer();
-//}
+
 
 // Helper function to create a 3x4 transform matrix
 void OptixRenderer::createTransformMatrix(float(&transform)[12], float3 translation, float3 scale,
@@ -781,65 +749,6 @@ std::vector<char> OptixRenderer::loadFile(const std::string& path) {
     return data;
 }
 
-void OptixRenderer::updateObjectTransform(int object_idx, float rotation_x, float rotation_y, float rotation_z) {
-    //if (object_idx < 0 || object_idx >= (int)object_transforms.size()) return;
-
-    //object_transforms[object_idx].rotation_x = rotation_x;
-    //object_transforms[object_idx].rotation_y = rotation_y;
-    //object_transforms[object_idx].rotation_z = rotation_z;
-
-    //const auto& obj_config = current_scene_data.objects[object_idx];
-    //createTransformMatrix(
-    //    obj_config.position,
-    //    obj_config.scale,
-    //    instances[object_idx].transform,
-    //    rotation_x,
-    //    rotation_y,
-    //    rotation_z
-    //);
-
-    //// Update this instance on GPU
-    //size_t offset = object_idx * sizeof(OptixInstance);
-    //CUDA_CHECK(cudaMemcpy(
-    //    (void*)((CUdeviceptr)device_buffers.d_instances + offset),
-    //    &instances[object_idx],
-    //    sizeof(OptixInstance),
-    //    cudaMemcpyHostToDevice
-    //));
-
-    //rebuildIAS();
-}
-
-void OptixRenderer::getObjectRotation(int object_idx, float& rotation_x, float& rotation_y, float& rotation_z) const {
-    if (object_idx < 0 || object_idx >= (int)object_transforms.size()) return;
-    rotation_x = object_transforms[object_idx].rotation_x;
-    rotation_y = object_transforms[object_idx].rotation_y;
-    rotation_z = object_transforms[object_idx].rotation_z;
-}
-
-void OptixRenderer::rebuildIAS() {
-    //// Rebuild the IAS with the updated instance transform
-    //OptixBuildInput inst_input = {};
-    //inst_input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-    //inst_input.instanceArray.instances = device_buffers.d_instances;
-    //inst_input.instanceArray.numInstances = (unsigned int)instances.size();;
-
-    //OptixAccelBuildOptions ias_opts = {};
-    //ias_opts.buildFlags = OPTIX_BUILD_FLAG_NONE;
-    //ias_opts.operation = OPTIX_BUILD_OPERATION_BUILD;  // Rebuild, not update
-
-    //CUdeviceptr d_ias_temp;
-    //CUDA_CHECK(cudaMalloc((void**)&d_ias_temp, ias_sizes.tempSizeInBytes));
-
-    //OPTIX_CHECK(optixAccelBuild(context, 0, &ias_opts, &inst_input, 1,
-    //    d_ias_temp, ias_sizes.tempSizeInBytes,
-    //    device_buffers.d_ias_output, ias_sizes.outputSizeInBytes,
-    //    &ias_handle, nullptr, 0));
-
-    //CUDA_CHECK(cudaFree((void*)d_ias_temp));
-    //DEBUG_LOG("[IAS] Rebuilt");
-}
-
 void OptixRenderer::updateCamera(const Camera& camera) {
     // Check if camera has moved significantly
     float3 pos_diff = camera.origin - last_camera.origin;
@@ -852,10 +761,7 @@ void OptixRenderer::updateCamera(const Camera& camera) {
     if (pos_distance > 0.001f || dir_distance > 0.001f) {
         // Camera moved - reset accumulation
         resetAccumulationBuffer();
-        //DEBUG_LOG("[Camera] Moved - accumulation reset");
     }
-
-
     last_camera = camera;
 }
 
@@ -879,103 +785,32 @@ void OptixRenderer::switchScene(SceneID scene_id) {
     DEBUG_LOGF("[Scene] Switched to: %s with %zu objects.",
         current_scene_data.name.c_str(),
         current_scene_data.objects.size());
-//
-//    // Load all objects in the scene and merge them
-//    MergedObjMesh combined_mesh;
-//
-//    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
-//        const auto& obj_config = current_scene_data.objects[i];
-//
-//        auto meshes = loadObj(obj_config.obj_path, obj_config.mtl_path);
-//        if (meshes.empty()) {
-//            throw std::runtime_error("Failed to load object: " + obj_config.name);
-//        }
-//
-//        auto obj_mesh = mergeObjMeshes(meshes);
-//
-//        // Merge this object into combined mesh
-//        uint32_t vertex_base = (uint32_t)combined_mesh.vertices.size();
-//        uint32_t material_base = (uint32_t)combined_mesh.materials.size();
-//
-//        // Copy vertices
-//        for (const auto& v : obj_mesh.vertices) {
-//            combined_mesh.vertices.push_back(v);
-//        }
-//
-//        // Copy indices and remap material indices
-//        for (const auto& tri : obj_mesh.indices) {
-//            combined_mesh.indices.push_back(make_uint3(
-//                tri.x + vertex_base,
-//                tri.y + vertex_base,
-//                tri.z + vertex_base
-//            ));
-//        }
-//
-//        // Copy SBT index buffer with material offset
-//        for (uint32_t sbt_idx : obj_mesh.sbt_index_buffer) {
-//            combined_mesh.sbt_index_buffer.push_back(sbt_idx + material_base);
-//        }
-//
-//        // Copy materials
-//        for (const auto& mat : obj_mesh.materials) {
-//            combined_mesh.materials.push_back(mat);
-//        }
-//    }
-//
-//    merged_mesh = combined_mesh;
-//
-//    // Initialize transform state for each object
-//    object_transforms.clear();
-//    object_transforms.resize(current_scene_data.objects.size());
-//    for (size_t i = 0; i < current_scene_data.objects.size(); ++i) {
-//        object_transforms[i].rotation_x = current_scene_data.objects[i].rotation_x;
-//        object_transforms[i].rotation_y = current_scene_data.objects[i].rotation_y;
-//        object_transforms[i].rotation_z = current_scene_data.objects[i].rotation_z;
-//    }
-//
-//    DEBUG_LOGF("[Scene] Loading: %s with %zu objects",
-//        current_scene_data.name.c_str(),
-//        current_scene_data.objects.size());
-//
-//    uploadGeometryData();
-//    loadMap(current_scene_data.envmap_path);
-//
-//    // Rebuild acceleration structures
-//    buildGAS();
-//    buildIAS();
-//
-//    // Rebuild SBT
-//    buildSBT();
-//
-//    // Update lighting
-//    params.num_lights = current_scene_data.num_lights;
-//    for (int i = 0; i < current_scene_data.num_lights; ++i) {
-//        params.lights[i] = current_scene_data.lights[i];
-//    }
-//
-//    // Update envmap
-//    if (!current_scene_data.envmap_path.empty()) {
-//        loadMap(current_scene_data.envmap_path);
-//    }
-//    else {
-//        params.envmap.has_envmap = false;
-//    }
-//
-//    params.envmap.scale = current_scene_data.envmap_scale;
-//    params.envmap.exposure = current_scene_data.envmap_exposure;
-//
-//    updateCamera({
-//         current_scene_data.camera_position,
-//         current_scene_data.camera_lookat,
-//         current_scene_data.camera_up,
-//         current_scene_data.camera_vfov
-//        });
-//
-//    // Reset accumulation
-//    resetAccumulationBuffer();
-//
-//    DEBUG_LOGF("[Scene] Switched to: %s with %zu objects, %d total materials",
-//        current_scene_data.name.c_str(),
-//        current_scene_data.objects.size(),
-//        (int)merged_mesh.materials.size());
+}
+
+void OptixRenderer::SetupDenoiser() {
+    const OptixDenoiserOptions denoiser_options = {
+        .denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY
+    };
+    // Set to true if you want to denoise the alpha channel as well
+    OptixDenoiser denoiser;
+    OptixDenoiserModelKind model_kind = OPTIX_DENOISER_MODEL_KIND_HDR;
+
+    OPTIX_CHECK(optixDenoiserCreate(context, model_kind, &denoiser_options, &denoiser));
+
+    OptixDenoiserSizes denoiser_sizes;
+    OPTIX_CHECK(optixDenoiserComputeMemoryResources(denoiser, params.width, params.height, &denoiser_sizes));
+
+    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_state, denoiser_sizes.stateSizeInBytes));
+    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_scratch, denoiser_sizes.withoutOverlapScratchSizeInBytes));
+
+    OPTIX_CHECK(optixDenoiserSetup(
+        denoiser,
+        0,
+        params.width,
+        params.height,
+        device_buffers.d_denoiser_state,
+        denoiser_sizes.stateSizeInBytes,
+        device_buffers.d_denoiser_scratch,
+        denoiser_sizes.withoutOverlapScratchSizeInBytes)
+    );
 }

@@ -22,6 +22,7 @@ struct ObjMaterial {
     float3      emission = { 0.f,  0.f,  0.f };
     float       ior = 1.5f;
     float       shininess = 32.f;
+	float3      specular = { 1.0f, 1.0f, 1.0f };
     bool        is_glass = false;
     bool        is_emissive = false;
 
@@ -31,7 +32,6 @@ struct ObjMaterial {
     float3 base_color = { 0.8f, 0.8f, 0.8f };
 
     struct TexturePaths {
-        std::string ambient_path = "";
         std::string diffuse_path = "";
         std::string specular_path = ""; //Red channel: Occlusion, Green channel : Roughness, Blue channel : Metalness
         std::string bump_path = "";
@@ -117,17 +117,13 @@ inline ObjMaterial ObjMaterial::from(const tinyobj::material_t& material, const 
     out.name = material.name;
     out.albedo = make_float3(material.diffuse[0], material.diffuse[1], material.diffuse[2]);
     out.emission = make_float3(material.emission[0], material.emission[1], material.emission[2]);
+	out.specular = make_float3(material.specular[0], material.specular[1], material.specular[2]);
     out.shininess = material.shininess > 0.f ? material.shininess : 32.f;
     out.ior = material.ior > 1.f ? material.ior : 1.5f;
-    out.is_glass = (material.illum == 4) || (material.illum == 6) || (material.illum == 7) || (material.illum == 9);// || (material.dissolve < 0.99f) || (material.ior > 1.01f);
+    out.is_glass = (material.illum == 3) || (material.illum == 4) || (material.illum == 6) || (material.illum == 7) || (material.illum == 9) || (material.name.find("Glass") != std::string::npos);// || (material.dissolve < 0.99f) || (material.ior > 1.01f);
     float emit_lum = out.emission.x + out.emission.y + out.emission.z;
     out.is_emissive = emit_lum > 0.001f || !out.texture_paths.emissive_path.empty();
 
-    if (!material.ambient_texname.empty()) {
-        std::string resolved = resolveTexturePath(material.ambient_texname, base_dir);
-        if (!resolved.empty())
-            out.texture_paths.ambient_path = resolved;
-    }
     if (!material.diffuse_texname.empty()) {
         std::string resolved = resolveTexturePath(material.diffuse_texname, base_dir);
         if (!resolved.empty())
@@ -172,6 +168,10 @@ inline ObjMaterial ObjMaterial::from(const tinyobj::material_t& material, const 
     out.base_color = out.metallic > 0.5f
         ? make_float3(material.specular[0], material.specular[1], material.specular[2])
         : make_float3(material.diffuse[0], material.diffuse[1], material.diffuse[2]);
+
+    //out.base_color = out.metallic > 0.5f
+    //    ? make_float3(1.f, 0.f, 0.f)
+    //    : make_float3(0.f, 1.f, 0.f);
 
     return out;
 }
@@ -291,83 +291,10 @@ inline LoadedSceneObject loadSceneObject(const std::string& name,
             scene_object.sbt_index_buffer.push_back((uint32_t)mat_id);
         }
     }
-
-    for (int i = 0; i < 100; i++) {
-        //printf("[Normal] %d: x %f , y %f , z %f \n", i, scene_object.vertices[i].normal.x, scene_object.vertices[i].normal.y, scene_object.vertices[i].normal.z);
-    }
     
     //computeSmoothNormals(scene_object);  // TODO Compute smooth normals where absent
 
-    for (int i = 0; i < 100; i++) {
-        //printf("[Normal] %d: x %f , y %f , z %f \n", i, scene_object.vertices[i].normal.x, scene_object.vertices[i].normal.y, scene_object.vertices[i].normal.z);
-    }
-
     printf("[Scene] '%s': %zu verts, %zu tris, %zu materials\n", name.c_str(), scene_object.vertices.size(), scene_object.indices.size(), scene_object.materials.size());
-
- //   struct TextureUsage {
- //       int ambient_texname = 0;             // map_Ka. For ambient or ambient occlusion.
- //       int diffuse_texname = 0;             // map_Kd
- //       int specular_texname = 0;            // map_Ks
- //       int bump_texname = 0;                // map_bump, map_Bump, bump
- //       int alpha_texname = 0;               // map_d
- //       int roughness_texname = 0;               // map_Pr
- //       int metallic_texname = 0;                // map_Pm
- //       int sheen_texname = 0;                   // map_Ps
- //       int emissive_texname = 0;                // map_Ke
- //       int normal_texname = 0;                 // norm. For normal mapping.
-	//} texture_usage;
-
- //   for (const auto& material: materials) {
- //       //printf("[Material]'%s', Texture: ambient '%s', diffuse '%s', specular '%s', bump '%s', alpha '%s'\n",
- //       //    material.name.c_str(),
- //       //    material.ambient_texname.c_str(),
- //       //    material.diffuse_texname.c_str(),
- //       //    material.specular_texname.c_str(),
- //       //    material.bump_texname.c_str(),
- //       //    material.alpha_texname.c_str());
-	//	if (!material.ambient_texname.empty()) texture_usage.ambient_texname++;
-	//	if (!material.diffuse_texname.empty()) texture_usage.diffuse_texname++;
-	//	if (!material.specular_texname.empty()) texture_usage.specular_texname++;
-	//	if (!material.bump_texname.empty()) texture_usage.bump_texname++;
-	//	if (!material.alpha_texname.empty()) texture_usage.alpha_texname++;
- //       if (!material.roughness_texname.empty()) texture_usage.roughness_texname++;
- //       if (!material.metallic_texname.empty()) texture_usage.metallic_texname++;
- //       if (!material.sheen_texname.empty()) texture_usage.sheen_texname++;
- //       if (!material.emissive_texname.empty()) texture_usage.emissive_texname++;
- //       if (!material.normal_texname.empty()) texture_usage.normal_texname++;
-	//}
-
- //   for (const auto& material : materials) {
- //  //     if (!material.ambient_texname.empty())
-	//		////loadTextureFromFile(base_dir + material.ambient_texname);
-	//	 //   loadTextureFromFile(resolveTexturePath(material.ambient_texname, base_dir));
- //  //     if (!material.diffuse_texname.empty())
- //  //         //loadTextureFromFile(base_dir + material.diffuse_texname);
-	//		//loadTextureFromFile(resolveTexturePath(material.diffuse_texname, base_dir));
- //  //     if (!material.specular_texname.empty())
- //  //         //loadTextureFromFile(base_dir + material.specular_texname);
-	//		//loadTextureFromFile(resolveTexturePath(material.specular_texname, base_dir));
- //  //     if (!material.bump_texname.empty())
- //  //         loadTextureFromFile(resolveTexturePath(material.bump_texname, base_dir));
- //  //     if (!material.alpha_texname.empty())
- //  //         loadTextureFromFile(resolveTexturePath(material.alpha_texname, base_dir));
- //       if (!material.emissive_texname.empty())
- //           loadTextureFromFile(resolveTexturePath(material.emissive_texname, base_dir));
-	//}
-
-	//printf("[Scene] Texture usage: ambient %d, diffuse %d, specular %d, bump %d, alpha %d, roughness %d, metallic %d, sheen %d, emissive %d, normal %d\n",
-	//	texture_usage.ambient_texname,
-	//	texture_usage.diffuse_texname,
-	//	texture_usage.specular_texname,
-	//	texture_usage.bump_texname,
-	//	texture_usage.alpha_texname,
- //       texture_usage.roughness_texname,
- //       texture_usage.metallic_texname,
- //       texture_usage.sheen_texname,
- //       texture_usage.emissive_texname,
- //       texture_usage.normal_texname
-
-	//	);
 
     return scene_object;
 }

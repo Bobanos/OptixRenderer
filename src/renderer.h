@@ -55,15 +55,8 @@ public:
 
     // Rendering
     void render(const Camera& camera, int samples_per_pixel);
-    void updateInstanceTransform(int instance_idx, const float transform[12]);
-    void updateLightParametersPos(int light_idx, float3 pos);
-    void updateLightParametersColor(int light_idx, float3 color);
     void updateEnvmapParameters(float scale, float exposure);
     void updateLightIntensity(float light_intensity);
-
-    // Multi-object transforms
-    void updateObjectTransform(int object_idx, float rotation_x, float rotation_y, float rotation_z);
-    void getObjectRotation(int object_idx, float& rotation_x, float& rotation_y, float& rotation_z) const;
 
     // Scene switching
     void switchScene(SceneID scene_id);
@@ -87,6 +80,8 @@ public:
     void updateCamera(const Camera& camera);
     void resetAccumulationBuffer();
 
+    void SetupDenoiser();
+
 private:
     // Device pointers
     struct DeviceBuffers {
@@ -98,6 +93,8 @@ private:
         CUdeviceptr d_hg = 0;
         CUdeviceptr d_rg = 0;
         CUdeviceptr d_ms = 0;
+        CUdeviceptr d_denoiser_state = 0;
+        CUdeviceptr d_denoiser_scratch = 0;
     } device_buffers;
 
     // OptiX state
@@ -162,8 +159,6 @@ private:
     cudaArray_t envmap_cdf_marginal_array = nullptr;
     cudaArray_t envmap_cdf_conditional_array = nullptr;
 
-    void rebuildIAS();
-
     // Helper methods
     void createModuleAndProgramGroups();
     void createPipeline();
@@ -188,5 +183,4 @@ private:
 
     std::vector<char> loadFile(const std::string& path);
     cudaTextureObject_t loadTextureCached(const std::string& resolved_path);
-    //cudaTextureObject_t loadTextureFromFile(const std::string& path, cudaArray_t& out_array);
 };

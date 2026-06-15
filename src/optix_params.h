@@ -41,7 +41,8 @@ struct Params {
 
     float   light_intensity;
 
-    //int     max_bounce_depth;
+    int     max_bounce_depth;
+    int     rr_start_depth;
     int     samples_per_pixel;
     int     current_sample;
     unsigned int random_seed;
@@ -53,62 +54,38 @@ struct Params {
 
 constexpr unsigned int RAY_TYPE_COUNT = 1;
 
-constexpr OptixPayloadTypeID PAYLOAD_TYPE_RADIANCE = OPTIX_PAYLOAD_TYPE_ID_0;
 
-const unsigned int radiancePayloadSemantics[3] = {
-    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-};
-//const unsigned int radiancePayloadSemantics[18] =
-//{
-//    // RadiancePRD::attenuation
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
-//    // RadiancePRD::seed
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
-//    // RadiancePRD::depth
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | OPTIX_PAYLOAD_SEMANTICS_CH_READ_WRITE,
+// ------------------------------------------------------------------
+// RadiancePRD payload layout
 //
-//    // RadiancePRD::emitted
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    // RadiancePRD::radiance
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE,
-//    // RadiancePRD::origin
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    // RadiancePRD::direction
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE,
-//    // RadiancePRD::done
-//    OPTIX_PAYLOAD_SEMANTICS_TRACE_CALLER_READ | OPTIX_PAYLOAD_SEMANTICS_CH_WRITE | OPTIX_PAYLOAD_SEMANTICS_MS_WRITE
-//};
+// Register map (18 registers total):
+//   p0..p2   : throughput      (float3, RW by caller and CH)
+//   p3       : seed            (uint,   RW by caller and CH)
+//   p4       : done            (uint,   W by CH and MS, R by caller)
+//   p5..p7   : emitted         (float3, W by CH and MS, R by caller)
+//   p8..p10  : radiance        (float3, W by CH and MS, R by caller - unused for now, kept for NEE)
+//   p11..p13 : next_origin     (float3, W by CH, R by caller)
+//   p14..p16 : next_direction  (float3, W by CH, R by caller)
+//   p17      : is_specular     (uint,   W by CH, R by caller - for MIS later)
+// ------------------------------------------------------------------
 
-struct RadiancePRD {
-    float3 radiance;
+// ------------------------------------------------------------------
+// RadiancePRD struct - holds path state communicated via payload registers
+// ------------------------------------------------------------------
+struct RadiancePRD
+{
+    // Caller writes before trace, CH reads and writes back
+    float3       throughput;    // current path weight (starts at 1,1,1)
+    unsigned int seed;          // PCG32 state (lower 32 bits; inc is derived from pixel)
+
+    // CH / MS write, caller reads after trace
+    unsigned int done;          // 1 = path terminates (miss or absorbed)
+    float3       emitted;       // Le at this surface (for emissive geometry)
+    float3       radiance;      // direct light contribution (unused until NEE)
+    float3       next_origin;   // scattered ray origin
+    float3       next_direction;// scattered ray direction
+    unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
 };
-
-//struct RadiancePRD
-//{
-//    // these are produced by the caller, passed into trace, consumed/modified by CH and MS and consumed again by the caller after trace returned.
-//    float3       attenuation;
-//    unsigned int seed;
-//    int          depth;
-//
-//    // these are produced by CH and MS, and consumed by the caller after trace returned.
-//    float3       emitted;
-//    float3       radiance;
-//    float3       origin;
-//    float3       direction;
-//    int          done;
-//};
 
 //===================================================================================================
 
@@ -120,22 +97,37 @@ struct HitGroupDataCommon
 {
     ColoredVertex* vertices;
     uint3* indices; 
-	float3 albedo;  // Base color (if no texture)
+	//float3 albedo;  // Base color (if no texture)
 	float3 emission;  // Emissive color (can be > 1 for bright materials)
 	cudaTextureObject_t emission_texture; // 0 = no texture, use emission color
 };
 
 struct HitGroupDataCookTorrance : public HitGroupDataCommon
 {
-    cudaTextureObject_t albedo_texture; // 0 = no texture, use vertex color
-    float roughness;
-	float metallic;
-    float3 base_color;
+    // Base color / albedo
+    float3              base_color;         // constant base color (Kd for dielectric, Ks for metal)
+    cudaTextureObject_t albedo_texture;     // map_Kd — 0 if not present
+
+    // Specular (used to compute F0 per-texel when map_Ks is present)
+    float3              specular_color;     // constant Ks
+    cudaTextureObject_t specular_texture;   // map_Ks — 0 if not present
+
+    // Roughness — scalar fallback + optional texture (R channel)
+    float               roughness;          // scalar roughness in [0,1]
+    cudaTextureObject_t roughness_texture;  // map_Pr — 0 if not present
+
+    // Metallic — scalar fallback + optional texture (R channel)
+    float               metallic;           // scalar metallic in [0,1]
+    cudaTextureObject_t metallic_texture;   // map_Pm — 0 if not present
+
+    cudaTextureObject_t alpha_texture;   // map_d — 0 if not present
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
-    float refraction_index;
+    float refraction_index; // IOR (e.g. 1.5 for standard glass)
+    float3 tint;            // color tint — (1,1,1) for clear glass
+    cudaTextureObject_t tint_texture; // map_Kd — 0 if not present
 };
 
 // Compile-time verification template for derived hit group types
