@@ -85,6 +85,8 @@ struct RadiancePRD
     float3       next_origin;   // scattered ray origin
     float3       next_direction;// scattered ray direction
     unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
+    float3       albedo;        // base color (for denoiser)
+    float3       normal;        // shading normal (for denoiser)
 };
 
 //===================================================================================================

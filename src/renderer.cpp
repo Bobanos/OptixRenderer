@@ -258,7 +258,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.numAttributeValues = 2;
-    pipeline_compile_options.numPayloadValues = 18;
+    pipeline_compile_options.numPayloadValues = 23;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
     pipeline_compile_options.pipelineLaunchParamsSizeInBytes = sizeof(Params);
@@ -813,4 +813,9 @@ void OptixRenderer::SetupDenoiser() {
         device_buffers.d_denoiser_scratch,
         denoiser_sizes.withoutOverlapScratchSizeInBytes)
     );
+
+
+
+
+	OPTIX_CHECK(optixDenoiserDestroy(denoiser));
 }

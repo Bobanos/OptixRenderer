@@ -34,7 +34,7 @@ __device__ float rnd(unsigned int& seed) {
 
 
 // ------------------------------------------------------------------
-// Register layout (matches radiancePayloadSemantics in optix_params.h):
+// Register layout 
 //   p0..p2  : throughput     (float3,  RW)
 //   p3      : seed           (uint32,  RW)  — lower 32 bits of PCG state
 //   p4      : done           (uint32,   W by CH/MS, R by caller)
@@ -43,10 +43,10 @@ __device__ float rnd(unsigned int& seed) {
 //   p11..p13: next_origin    (float3,   W by CH)
 //   p14..p16: next_direction (float3,   W by CH)
 //   p17     : is_specular    (uint32,   W by CH)
+//   p18..p20: albedo         (float3,   W by CH) - (for denoiser)
+//   p21..p23: normal         (float3,   W by CH) - (for denoiser)
 // ------------------------------------------------------------------
 
-// Convenience: write only the fields CH/MS are allowed to write.
-// throughput and seed are RW so the CH can also write those (BRDF weight + advanced RNG).
 static __forceinline__ __device__ void storeClosesthitRadiancePRD(const RadiancePRD& prd)
 {
     optixSetPayload_0(__float_as_uint(prd.throughput.x));
@@ -101,7 +101,6 @@ static __forceinline__ __device__ RadiancePRD loadMissRadiancePRD()
 
 // ------------------------------------------------------------------
 // traceRadiance — fires a ray and returns filled RadiancePRD
-// Carries throughput and seed IN to CH, reads all outputs after invoke.
 // ------------------------------------------------------------------
 static __forceinline__ __device__ void traceRadiance(
     OptixTraversableHandle handle,
@@ -239,8 +238,7 @@ static __forceinline__ __device__ float3 getAlpha(
 // Cook-Torrance material helpers
 // ------------------------------------------------------------------
 
-// Returns base color sampled from texture (sRGB -> linear via hardware
-// if texture was created with cudaReadModeNormalizedFloat + sRGB flag).
+// Returns base color sampled from texture
 // Falls back to sbt->base_color if no texture.
 static __forceinline__ __device__ float3 getBaseColor(
     const HitGroupDataCookTorrance* sbt, float2 uv)
@@ -302,7 +300,6 @@ static __forceinline__ __device__ float3 lerp3(float3 a, float3 b, float t)
 }
 
 // Build orthonormal tangent frame around a shading normal.
-// Uses the Duff et al. 2017 method (numerically stable).
 static __forceinline__ __device__ void buildONB(
     const float3& n,
     float3& tangent,
@@ -466,13 +463,7 @@ __device__ float3 sampleEnvmap(cudaTextureObject_t tex, float3 dir)
 
 
 // ==================================================================================
-// RAYGEN — iterative path tracing loop
-//
-// Each launch thread processes one pixel. The bounce loop calls traceRadiance
-// once per bounce (maxTraceDepth = 1 in the pipeline), making this fully iterative.
-// The CH shaders write the next ray origin/direction into the payload registers
-// and return — they never call optixTrace themselves.
-//
+// RAYGEN
 // Accumulation: running average across frames using params.current_sample.
 // ==================================================================================
 extern "C" __global__ void __raygen__pathTracer()
@@ -484,7 +475,6 @@ extern "C" __global__ void __raygen__pathTracer()
     const unsigned int pixel_index = idx.y * params.width + idx.x;
 
     // Per-pixel sample loop
-    // samples_per_pixel > 1 is supported but set to 1 for interactive rendering.
     // Accumulation across frames is handled below via the running average.
     float3 frame_color = make_float3(0.f, 0.f, 0.f);
 
@@ -802,7 +792,6 @@ extern "C" __global__ void __closesthit__cookTorrance()
 
     // Fill payload 
     // Multiply current throughput by the BRDF weight for this bounce.
-    // Raygen will read prd.throughput and use it as the new path weight.
     prd.throughput = prd.throughput * brdf_weight;
     prd.next_origin = hit_pos + EPS * normal;
     prd.next_direction = normalize(scatter_dir_world);
