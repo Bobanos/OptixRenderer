@@ -16,11 +16,16 @@ public:
     Camera getCameraData() const;// Returns Camera struct (from optix_params.h) for OptiX
 
     float3 getPosition() const { return position; }
-    float3 getLookAt() const { return look_at; }
+    float3 getLookAt() const { return position + front; }
+    float3 getFront() const { return front; }
     float getSpeed() const { return movement_speed; }
 
 	void setPosition(const float3& new_position) { position = new_position; updateCameraVectors(); }
-	void setLookAt(const float3& new_look_at) { look_at = new_look_at; updateCameraVectors(); }
+    void setLookAt(const float3& new_look_at) {
+        look_at = new_look_at;
+        front = normalize(look_at - position);
+        updateCameraVectors();
+    }
 
 private:
     void updateCameraVectors();

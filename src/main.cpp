@@ -33,20 +33,6 @@ const int window_width = 1200;
 const int window_height = 1000;
 
 const float PI = 3.14159265f;
-const float DEG2RAD = PI / 180.0f;
-const float RAD2DEG = 180.0f / PI;
-
-template <typename T>
-struct Record
-{
-    __align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
-    T data;
-};
-
-typedef Record<RayGenData>   RayGenRecord;
-typedef Record<MissData>     MissRecord;
-typedef Record<HitGroupDataCookTorrance> HitGroupRecordCookTorrance;
-typedef Record<HitGroupDataGlass> HitGroupRecordGlass;
 
 // Global renderer instance
 OptixRenderer* renderer = nullptr;
@@ -58,6 +44,7 @@ bool g_mouse_captured = false;
 // ------------------------------------------------------------------
 // Screenshots and output management
 // ------------------------------------------------------------------
+
 // Helper function to save screenshot as PPM (simple, no external deps)
 void saveScreenshot(const uchar4* pixel_buffer, int width, int height,
     const std::string& filename)
@@ -104,6 +91,23 @@ std::string generateScreenshotFilename(const std::string& scene_name)
         << ".ppm";
 
     return ss.str();
+}
+
+void screenshot(const std::string& scene_name,std::string append, const uchar4* pixel_buffer, int width, int height) {
+    // Ensure screenshots directory exists
+    std::filesystem::create_directories("screenshots");
+
+    std::string current_scene_name = scene_name;
+    // Replace spaces with underscores
+    std::replace(current_scene_name.begin(), current_scene_name.end(), ' ', '_');
+	current_scene_name.append(append);
+
+    // Generate timestamped filename
+    std::string filename = generateScreenshotFilename(current_scene_name);
+    std::vector<uchar4> pixel_data(width * height);
+    CUDA_CHECK(cudaMemcpy(pixel_data.data(), pixel_buffer,
+        width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
+    saveScreenshot(pixel_data.data(), width, height, filename);
 }
 
 // ------------------------------------------------------------------
@@ -271,6 +275,8 @@ int main() {
         renderer->setupShaders();
         renderer->setupLighting();
 
+        renderer->setupDenoiser();
+
         // Create display buffer
         ImGuiDisplayBuffer display(width, height);
 
@@ -292,6 +298,8 @@ int main() {
         float lastFrame = 0.0f;
 
         int spp_input = renderer->getParams().samples_per_pixel;
+		int max_bounces_input = renderer->getParams().max_bounce_depth;
+        float blendFactor = 0.0f;
 
         // ----------------------------------------------------------
         // Render Loop
@@ -314,16 +322,27 @@ int main() {
             processInput(window, deltaTime);
 
 			bool light_changed = false; 
-
             {
 				renderer->updateCamera(camera_controller.getCameraData());
                 // Render
                 renderer->render(camera_controller.getCameraData(), renderer->getParams().samples_per_pixel);
 
+				//renderer->postprocessAccum();
+
+                //screenshot(renderer->getCurrentSceneName(), "_Accum", renderer->getPixelBuffer(), renderer->getWidth(), renderer->getHeight());
+
+				renderer->runDenoiser(blendFactor);
+
+                renderer->postprocessDenoised();
+
+                //screenshot(renderer->getCurrentSceneName(), "_Denoised", renderer->getPixelBuffer(), renderer->getWidth(), renderer->getHeight());
                 // Copy to display
                 display.copyFromDevice((CUdeviceptr)renderer->getPixelBuffer());
+
+                //glfwSetWindowShouldClose(window, true);
             }
 
+            //================================================================================================================
             // ImGui viewport window
             ImGui::Begin("Viewport", nullptr, ImGuiWindowFlags_NoScrollbar);
 
@@ -334,9 +353,14 @@ int main() {
                 ImVec2(0, 1),  // UV coordinates (flip Y)
                 ImVec2(1, 0)
             );
+            ImVec2 window_pos1 = ImGui::GetWindowPos();
+            ImVec2 window_size1 = ImGui::GetWindowSize();
             ImGui::End();
 
+            //================================================================================================================
             // Camera Controls window
+			//ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
+            //ImGui::SetNextWindowSize(ImVec2(10, 10), ImGuiCond_Once);
             ImGui::Begin("Camera Controls");
             ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
             ImGui::Text("Press TAB to toggle camera control");
@@ -344,9 +368,10 @@ int main() {
 
             float3 pos = camera_controller.getPosition();
             ImGui::Text("Position: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
-            //float3 look = camera_controller.getLookAt();
-            float3 look = g_camera->getLookAt();
+
+            float3 look = camera_controller.getLookAt();
             ImGui::Text("LookAt: (%.2f, %.2f, %.2f)", look.x, look.y, look.z);
+            ImGui::Text("Samples Accumulated: (%.2d)", renderer->getCurrentSample());
             ImGui::Text("Speed: %.2f", camera_controller.getSpeed());
 
             ImGui::Separator();
@@ -356,6 +381,9 @@ int main() {
             ImGui::BulletText("Mouse: Look around");
             ImGui::BulletText("Scroll: Adjust speed");
             ImGui::Separator();
+
+            ImVec2 window_pos2 = ImGui::GetWindowPos();
+            ImVec2 window_size2 = ImGui::GetWindowSize();
 
             // Screenshot button
             if (ImGui::Button("Save Screenshot", ImVec2(-1, 0))) {
@@ -384,27 +412,24 @@ int main() {
                 ImGui::SetTooltip("Saves current viewport to screenshots/ folder as PPM");
             }
             ImGui::Separator();
+            ImGui::SetNextItemWidth(100.0f);
             if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
                 spp_input = fmaxf(1, spp_input);
                 renderer->setSamplesPerPixel(spp_input);
-                renderer->resetAccumulationBuffer();
+                renderer->resetBuffersOnCameraUpdate();
             }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(?)");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                ImGui::SetTooltip("Number of samples to accumulate per frame.\nLower = faster but noisier.\nHigher = slower but cleaner.");
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(100.0f);
+            if (ImGui::InputInt("Max bounces", &max_bounces_input, 1, 10)) {
+                max_bounces_input = fmaxf(1, max_bounces_input);
+                renderer->setMaxBounceDepth(max_bounces_input);
+                renderer->resetBuffersOnCameraUpdate();
             }
             ImGui::End();
 
+            //================================================================================================================
             // Light control
-            ImGui::Begin("Light Controls");
-
-            static float light0_pos[3] = { 2.0f, 3.0f, 2.0f };
-            static float light0_col[3] = { 1.0f, 0.4f, 0.4f };
-            static float light1_pos[3] = { 2.0f, 3.0f, -2.0f };
-            static float light1_col[3] = { 0.4f, 0.4f, 1.0f };
-            static float light2_dir[3] = { 0.0f, -1.0f, -0.2f };
-            static float light2_col[3] = { 0.5f, 0.5f, 0.5f };
+            ImGui::Begin("Lighting Controls");
 
 			static float env_map_scale = renderer->getParams().envmap.scale;
 			static float env_map_expo = renderer->getParams().envmap.exposure;
@@ -415,46 +440,64 @@ int main() {
                 ImGui::BeginDisabled();
             }
 
-            ImGui::Text("Enviromental Map Settings");
+            ImGui::SetNextItemWidth(100.0f);
             if (ImGui::DragFloat("Scale", &env_map_scale, 0.05f, 0.f, 100.0f)) {
                 renderer->updateEnvmapParameters(env_map_scale, env_map_expo);
                 light_changed = true;
             }
 
+            ImGui::SetNextItemWidth(100.0f);
             if (ImGui::DragFloat("Exposure", &env_map_expo, 0.05f, 100.0f, 1.0f)) {
                 renderer->updateEnvmapParameters(env_map_scale, env_map_expo);
                 light_changed = true;
             }
 
+            ImGui::SetNextItemWidth(100.0f);
             if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 100.0f, 1.0f)) {
                 renderer->updateLightIntensity(light_intensity);
                 light_changed = true;
             }
+            ImGui::SetNextItemWidth(100.0f);
+            if (ImGui::SliderFloat("Denoiser Blend factor", &blendFactor, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {}
 
             if (light_changed) {
-                renderer->resetAccumulationBuffer(); // Clear accumulation when manually adjusting rotation
+                renderer->resetBuffersOnCameraUpdate(); // Clear accumulation when manually adjusting rotation
             }
 
             if (g_mouse_captured) {
                 ImGui::EndDisabled();
             }
-
+            ImVec2 window_pos3 = ImGui::GetWindowPos();
+            ImVec2 window_size3 = ImGui::GetWindowSize();
             ImGui::End();
 
+            //================================================================================================================
             ImGui::Begin("Scene Selection");
-
             static SceneID selected_scene = renderer->getCurrentSceneID();
-
             for (int i = 0; i < static_cast<int>(SceneID::COUNT); ++i) {
 				SceneData iter_scene = SceneManager::getSceneConfig(static_cast<SceneID>(i));
                 if (ImGui::RadioButton(iter_scene.name.c_str(), (int*)&selected_scene, (int)static_cast<SceneID>(i))) {
                     renderer->switchScene(static_cast<SceneID>(i));
 					camera_controller.setPosition(iter_scene.camera_position);
                     camera_controller.setLookAt(iter_scene.camera_lookat);
-                    renderer->resetAccumulationBuffer();
+                    renderer->resetBuffersOnCameraUpdate();
                 }
             }
+            ImVec2 window_pos4 = ImGui::GetWindowPos();
+            ImVec2 window_size4 = ImGui::GetWindowSize();
             ImGui::Text("Current: %s", renderer->getCurrentSceneName().c_str());
+            ImGui::End();
+            //================================================================================================================
+
+            ImGui::Begin("Window sizes");
+            ImGui::Text("Current Position window 1: X = %.1f, Y = %.1f", window_pos1.x, window_pos1.y);
+            ImGui::Text("Current Size window 1:     W = %.1f, H = %.1f", window_size1.x, window_size1.y);
+            ImGui::Text("Current Position window 2: X = %.1f, Y = %.1f", window_pos2.x, window_pos2.y);
+            ImGui::Text("Current Size window 2:     W = %.1f, H = %.1f", window_size2.x, window_size2.y);
+            ImGui::Text("Current Position window 3: X = %.1f, Y = %.1f", window_pos3.x, window_pos3.y);
+            ImGui::Text("Current Size window 3:     W = %.1f, H = %.1f", window_size3.x, window_size3.y);
+            ImGui::Text("Current Position window 4: X = %.1f, Y = %.1f", window_pos4.x, window_pos4.y);
+            ImGui::Text("Current Size window 4:     W = %.1f, H = %.1f", window_size4.x, window_size4.y);
             ImGui::End();
 
             // Render ImGui

@@ -9,6 +9,7 @@
 #include "obj_loader.h"
 #include "camera.h"
 #include "scene.h"
+#include "post_process.h"
 
 
 #ifdef _DEBUG
@@ -66,27 +67,36 @@ public:
 
     // Getters
     uchar4* getPixelBuffer() const { return params.image; }
-    float3* getAccumBuffer() const { return params.accum_buffer; }
+    float4* getAccumBuffer() const { return params.accum_buffer; }
+    float4* getAlbedoBuffer() const { return params.albedo_buffer; }
+    float4* getNormalBuffer() const { return params.normal_buffer; }
+    //cudaStream_t getStream() const { return stream; }
     int getWidth() const { return params.width; }
     int getHeight() const { return params.height; }
+    int getCurrentSample() const { return params.current_sample; }
     Params& getParams() { return params; }
     SceneData getCurrentSceneData() const { return current_scene_data; }
 
     // Parameter updates
-    //void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
+    void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
     void setSamplesPerPixel(int spp) { params.samples_per_pixel = spp; }
     void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
 
     void updateCamera(const Camera& camera);
-    void resetAccumulationBuffer();
+    void resetBuffersOnCameraUpdate();
 
-    void SetupDenoiser();
+    void setupDenoiser();
+	void runDenoiser(float blendFactor);
+    void postprocessAccum();
+    void postprocessDenoised();
 
 private:
     // Device pointers
     struct DeviceBuffers {
         CUdeviceptr d_pixels = 0;
         CUdeviceptr d_accum_buffer = 0;
+        CUdeviceptr d_albedo_buffer = 0;
+        CUdeviceptr d_normal_buffer = 0;
         CUdeviceptr d_params = 0;
         CUdeviceptr d_ias_output_buffer = 0;
         CUdeviceptr d_instances = 0;
@@ -95,7 +105,10 @@ private:
         CUdeviceptr d_ms = 0;
         CUdeviceptr d_denoiser_state = 0;
         CUdeviceptr d_denoiser_scratch = 0;
+        CUdeviceptr d_denoised_buffer = 0;
     } device_buffers;
+
+	//CUstream stream = nullptr;
 
     // OptiX state
     OptixDeviceContext context = nullptr;
@@ -103,6 +116,9 @@ private:
     OptixPipeline pipeline = nullptr;
     OptixPipelineCompileOptions pipeline_compile_options = {};
     OptixShaderBindingTable sbt = {};
+
+    OptixDenoiser denoiser = nullptr;
+    OptixDenoiserSizes denoiser_sizes;
 
     // Program groups
     OptixProgramGroup raygen_program_group = nullptr;
@@ -113,7 +129,7 @@ private:
     // Acceleration structures
     OptixTraversableHandle ias_handle = 0;
     std::vector<OptixAccelBufferSizes> gas_sizes;
-    OptixAccelBufferSizes  ias_buffer_sizes;
+    OptixAccelBufferSizes  ias_buffer_sizes = {};
 
     // One per placed object in the scene — references a SceneObject
     struct SceneObjectInstance {

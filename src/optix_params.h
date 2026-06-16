@@ -33,7 +33,9 @@ struct EnvironmentMap {
 
 struct Params {
     uchar4* image;
-    float3* accum_buffer; 
+    float4* accum_buffer; 
+    float4* albedo_buffer;  // For denoiser guide layer
+    float4* normal_buffer;  // For denoiser guide layer
     int     width;
     int     height;
     Camera  camera;
@@ -59,8 +61,8 @@ constexpr unsigned int RAY_TYPE_COUNT = 1;
 // RadiancePRD payload layout
 //
 // Register map (18 registers total):
-//   p0..p2   : throughput      (float3, RW by caller and CH)
-//   p3       : seed            (uint,   RW by caller and CH)
+//   p0      : ray_type       (uint32,   R by CH/MS)
+//   p1..p3  : throughput     (float3,   RW)
 //   p4       : done            (uint,   W by CH and MS, R by caller)
 //   p5..p7   : emitted         (float3, W by CH and MS, R by caller)
 //   p8..p10  : radiance        (float3, W by CH and MS, R by caller - unused for now, kept for NEE)
@@ -74,9 +76,9 @@ constexpr unsigned int RAY_TYPE_COUNT = 1;
 // ------------------------------------------------------------------
 struct RadiancePRD
 {
+    unsigned int ray_type;
     // Caller writes before trace, CH reads and writes back
     float3       throughput;    // current path weight (starts at 1,1,1)
-    unsigned int seed;          // PCG32 state (lower 32 bits; inc is derived from pixel)
 
     // CH / MS write, caller reads after trace
     unsigned int done;          // 1 = path terminates (miss or absorbed)
@@ -85,9 +87,20 @@ struct RadiancePRD
     float3       next_origin;   // scattered ray origin
     float3       next_direction;// scattered ray direction
     unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
-    float3       albedo;        // base color (for denoiser)
-    float3       normal;        // shading normal (for denoiser)
 };
+
+struct DenoiserGuidePRD
+{
+	unsigned int ray_type;
+    float3 albedo;  // RGB = base color
+    float3 normal;  // RGB = normal
+};
+
+//struct ShadowPRD
+//{
+//	unsigned int ray_type;
+//    unsigned int occluded;      // 1 = path is occluded, 0 = unoccluded
+//};
 
 //===================================================================================================
 

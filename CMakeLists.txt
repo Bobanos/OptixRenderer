@@ -63,6 +63,8 @@ add_executable(optix_renderer
     src/loaders.cpp
     src/float3_math.h
     src/scene.h
+    cuda/Postprocess.cu   
+    src/post_process.h
 )
 
 target_include_directories(optix_renderer PRIVATE

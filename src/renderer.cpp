@@ -22,21 +22,25 @@ typedef Record<HitGroupDataCookTorrance> HitGroupRecordCookTorrance;
 typedef Record<HitGroupDataGlass> HitGroupRecordGlass;
 
 
-
+// Constructor to initialize renderer parameters, including setting the image width and height for the output buffer.
 OptixRenderer::OptixRenderer(int width, int height) {
     params.width = width;
     params.height = height;
 }
 
+// Destructor to clean up resources
 OptixRenderer::~OptixRenderer() {
     cleanup();
 }
 
+// Initializes cuda
 void OptixRenderer::initCUDA() {
     CUDA_CHECK(cudaFree(nullptr));
+    //CUDA_CHECK(cudaStreamCreate(&stream));
     DEBUG_LOG("[CUDA] Initialized");
 }
 
+// Initializes the OptiX context with appropriate options, including setting up a log callback for debugging and enabling validation layers in debug builds.
 void OptixRenderer::initOptix() {
     OPTIX_CHECK(optixInit());
 
@@ -53,6 +57,7 @@ void OptixRenderer::initOptix() {
     DEBUG_LOG("[OptiX] Context created");
 }
 
+// Loads the scene specified by scene_id.
 void OptixRenderer::loadScene(SceneID scene_id) {
 	current_scene_data = SceneManager::getSceneConfig(scene_id);  // Load scene configuration data (camera settings, object list, envmap path, etc.) for the specified scene ID and store in current_scene_data
 	current_scene_id = scene_id;  // Update the current scene ID to the newly loaded scene
@@ -147,6 +152,8 @@ cudaTextureObject_t OptixRenderer::loadTextureCached(const std::string& resolved
     return td.tex;
 }
 
+// Loads an HDR environment map from the specified path, uploads it to the GPU as a CUDA texture,
+// and computes the CDFs. If the path is empty or loading fails, it sets has_envmap to false in the params.
 void OptixRenderer::loadMap(const std::string& path) {
     if (path.empty()) {
         params.envmap.has_envmap = false;
@@ -212,6 +219,11 @@ void OptixRenderer::loadMap(const std::string& path) {
     DEBUG_LOG("[Env] Successfully loaded environment map with CDF");
 }
 
+// Uploads the vertex buffer, index buffer, and SBT index buffer for a given LoadedSceneObject to GPU memory.
+// The vertex buffer contains the geometry data (positions, normals, UVs) for the object's triangles, the index
+// buffer defines how vertices are connected into triangles, and the SBT index buffer maps each triangle to
+// a material index for shader binding. After this function is called, the LoadedSceneObject will have its
+// d_vertices, d_indices, and d_sbt_indices members populated with device pointers to the uploaded data.
 void OptixRenderer::uploadSceneObject(LoadedSceneObject& obj)
 {
     // 1. Full vertex buffer — read by shaders via sbt->vertices
@@ -247,8 +259,10 @@ void OptixRenderer::uploadSceneObject(LoadedSceneObject& obj)
             * sizeof(uint32_t)) / (1024.f * 1024.f));
 }
 
+// Creates OptiX modules and program groups by compiling the OptiX IR (PTX) code for the ray generation,
+// miss, and hit group shaders. The compiled modules and program groups are stored in the OptixRenderer
+// for later use when building the pipeline and SBT.
 void OptixRenderer::createModuleAndProgramGroups() {
-    //auto optix_ir = loadFile("generated/optixir/SimplePathTracer.optixir");
     auto optix_ir = loadFile("generated/optixir/PathTracer.optixir");
 
     OptixModuleCompileOptions module_compile_options = {};
@@ -312,6 +326,9 @@ void OptixRenderer::createModuleAndProgramGroups() {
     DEBUG_LOG("[OptiX] Program groups created");
 }
 
+// Creates the OptiX pipeline by linking the previously created program groups together,
+// and specifying pipeline-level options such as maximum trace depth. The resulting pipeline
+// is stored in the OptixRenderer for use during rendering.
 void OptixRenderer::createPipeline() {
     OptixProgramGroup groups[] = { 
         raygen_program_group, 
@@ -322,7 +339,7 @@ void OptixRenderer::createPipeline() {
 
     OptixPipelineLinkOptions pipeline_link_options = {};
     //pipeline_link_options.maxTraceDepth = 7;
-    pipeline_link_options.maxTraceDepth = 2;
+    pipeline_link_options.maxTraceDepth = 1;
 
     char log[4096];
     size_t logSize = sizeof(log);
@@ -340,9 +357,7 @@ void OptixRenderer::createPipeline() {
     DEBUG_LOG("[OptiX] Pipeline created");
 }
 
-// ------------------------------------------------------------------
-// Build single GAS with 1 build input and SbtIndexOffsetBuffer
-// ------------------------------------------------------------------
+// Builds a GAS for the given scene object using its vertex and index buffers, and stores the resulting traversable handle in the object.
 void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
     std::vector<uint32_t> geometryFlags(object.materials.size());
 
@@ -413,10 +428,9 @@ void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
 	DEBUG_LOGF("[GAS] Built '%s' with %zu materials", object.name.c_str(), object.materials.size());
 }
 
-// ----------------------------------------------------------
-// Build IAS — one instance pointing at the single GAS
-// sbtOffset = 0: base for SBT record lookup
-// ----------------------------------------------------------
+// Builds instance for each scene object and then builds the IAS referencing those instances
+// The IAS acts as TLAS (top-level acceleration structure) that allows ray traversal to reference
+// the GAS of each instance and apply the appropriate transformations for each instance
 void OptixRenderer::buildIAS() {
     // Create OptixInstance for each scene instance, which describes how to transform the geometry and which GAS to reference for that instance. 
     // The instance data is uploaded to a GPU buffer and used as input for building the IAS.
@@ -473,10 +487,9 @@ void OptixRenderer::buildIAS() {
 	DEBUG_LOGF("[IAS] Built with %zu instances", instances.size());
 }
 
-// ----------------------------------------------------------
-// SBT — one record per material
+
+// Builds SBT constaining one hit record per material
 // Each record points to either HitGroupRecordCookTorrance or HitGroupDataGlass
-// ----------------------------------------------------------
 void OptixRenderer::buildSBT() {
     const size_t max_stride = (sizeof(HitGroupRecordCookTorrance) > sizeof(HitGroupRecordGlass))
         ? sizeof(HitGroupRecordCookTorrance) : sizeof(HitGroupRecordGlass);
@@ -507,6 +520,12 @@ void OptixRenderer::buildSBT() {
                 }
                 else {
                     record.data.emission_texture = 0; // If no emission texture, set texture handle to 0
+                }
+                if (!material.texture_paths.diffuse_path.empty()) {
+                    record.data.tint_texture = loadTextureCached(material.texture_paths.diffuse_path); 
+                }
+                else {
+                    record.data.tint_texture = 0; // If no tint texture, set texture handle to 0
                 }
                 record.data.refraction_index = material.ior; // Set refraction index for glass material
 
@@ -586,12 +605,16 @@ void OptixRenderer::buildSBT() {
 
 }
 
+// Setup programs, module, pipeline, and SBT for the renderer.
+// Runs once per scene load
 void OptixRenderer::setupShaders() {
     createModuleAndProgramGroups();
     createPipeline();
     buildSBT();
 }
 
+// Mainly setups parameters for the params struct
+// Runs once per scene load
 void OptixRenderer::setupLighting() {
 
     // Path tracer settings
@@ -608,15 +631,22 @@ void OptixRenderer::setupLighting() {
     //DEBUG_LOGF("[Lighting] Setup complete %d lights", params.num_lights);
 }
 
+// Render the scene using the provided camera and number of samples per pixel. 
+// This function sets up the necessary parameters, allocates buffers if needed, and launches the OptiX pipeline to perform ray tracing.
+// Runs every frame
 void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
     // Allocate buffers if not already done
     if (!device_buffers.d_pixels) {
-        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_pixels, params.width * params.height * sizeof(uchar4)));
-        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_accum_buffer, params.width * params.height * sizeof(float3)));
+        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_pixels,          params.width * params.height * sizeof(uchar4)));
+        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_accum_buffer,    params.width * params.height * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_albedo_buffer,   params.width * params.height * sizeof(float4)));
+        CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_normal_buffer,   params.width * params.height * sizeof(float4)));
         CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_params, sizeof(Params)));
 
         params.image = (uchar4*)device_buffers.d_pixels;
-        params.accum_buffer = (float3*)device_buffers.d_accum_buffer;
+        params.accum_buffer = (float4*)device_buffers.d_accum_buffer;
+        params.albedo_buffer = (float4*)device_buffers.d_albedo_buffer;
+        params.normal_buffer = (float4*)device_buffers.d_normal_buffer;
     }
 
     params.camera = camera;
@@ -642,30 +672,47 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
 	params.current_sample++;
 }
 
+// Update the environment map scale and exposure parameters in the renderer's Params structure,
+// which are used during rendering to adjust the appearance of the environment map.
 void OptixRenderer::updateEnvmapParameters(float scale, float exposure) {
 	params.envmap.scale = scale;
 	params.envmap.exposure = exposure;
 }
 
+// Update the light intensity parameter in the renderer's Params structure, 
+// which is used during rendering to scale the contribution of light sources in the scene.
 void OptixRenderer::updateLightIntensity(float light_intensity) {
     params.light_intensity = light_intensity;
 }
 
-void OptixRenderer::resetAccumulationBuffer() {
+// Reset the accumulation buffer to zero and reset the current sample count to 0, 
+// effectively restarting the progressive rendering process.
+void OptixRenderer::resetBuffersOnCameraUpdate() {
     if (device_buffers.d_accum_buffer) {
-        CUDA_CHECK(cudaMemset((void*)device_buffers.d_accum_buffer, 0, params.width * params.height * sizeof(float3)));
+        CUDA_CHECK(cudaMemset((void*)device_buffers.d_accum_buffer, 0, params.width * params.height * sizeof(float4)));
+    }
+    if (device_buffers.d_albedo_buffer) {
+        CUDA_CHECK(cudaMemset((void*)device_buffers.d_albedo_buffer, 0, params.width * params.height * sizeof(float4)));
+    }
+    if (device_buffers.d_normal_buffer) {
+        CUDA_CHECK(cudaMemset((void*)device_buffers.d_normal_buffer, 0, params.width * params.height * sizeof(float4)));
     }
 	params.current_sample = 0;
 }
 
+// Cleanup all OptiX resources, including pipeline, context, denoiser, textures, environment maps, and device buffers.
 void OptixRenderer::cleanup() {
-    if (pipeline) optixPipelineDestroy(pipeline);
-    if (context) optixDeviceContextDestroy(context);
+    if (pipeline != nullptr) OPTIX_CHECK(optixPipelineDestroy(pipeline));
+    if (context != nullptr)  OPTIX_CHECK(optixDeviceContextDestroy(context));
+    //if (stream != nullptr)   CUDA_CHECK(cudaStreamDestroy(stream));
 
     FreeTexturesAndEnvMaps();
     FreeDeviceBuffers();
+
+	if (denoiser != nullptr) OPTIX_CHECK(optixDenoiserDestroy(denoiser));
 }
 
+// Free all textures and environment map resources, including CUDA texture objects and arrays.
 void OptixRenderer::FreeTexturesAndEnvMaps() {
     // Clean up textures
     for (auto& mat_tex : texture_cache) {
@@ -689,6 +736,8 @@ void OptixRenderer::FreeTexturesAndEnvMaps() {
     }
 }
 
+// Free all device buffers associated with loaded scene objects and renderer resources, including vertex/index buffers,
+// SBT indices, GAS outputs, pixel buffers, accumulation buffers, and parameter buffers.
 void OptixRenderer::FreeDeviceBuffers() {
     for (LoadedSceneObject object : loaded_scene_objects) {
         CUDA_CHECK(cudaFree((void*)object.d_vertices));    object.d_vertices = 0;
@@ -704,6 +753,8 @@ void OptixRenderer::FreeDeviceBuffers() {
 
     freeAndNull(device_buffers.d_pixels);
     freeAndNull(device_buffers.d_accum_buffer);
+    freeAndNull(device_buffers.d_albedo_buffer);
+    freeAndNull(device_buffers.d_normal_buffer);
     freeAndNull(device_buffers.d_params);
     freeAndNull(device_buffers.d_ias_output_buffer);
     freeAndNull(device_buffers.d_instances);
@@ -711,8 +762,6 @@ void OptixRenderer::FreeDeviceBuffers() {
     freeAndNull(device_buffers.d_rg);
     freeAndNull(device_buffers.d_ms);
 }
-
-
 
 // Helper function to create a 3x4 transform matrix
 void OptixRenderer::createTransformMatrix(float(&transform)[12], float3 translation, float3 scale,
@@ -735,6 +784,7 @@ void OptixRenderer::createTransformMatrix(float(&transform)[12], float3 translat
     transform[8] = r20 * scale.x;  transform[9] = r21 * scale.y;  transform[10] = r22 * scale.z;  transform[11] = translation.z;
 }
 
+// Load a binary file into a vector of chars. Throws an exception if the file cannot be opened.
 std::vector<char> OptixRenderer::loadFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f)
@@ -749,6 +799,7 @@ std::vector<char> OptixRenderer::loadFile(const std::string& path) {
     return data;
 }
 
+// Update camera parameters and reset accumulation buffer if camera moved since the last frame.
 void OptixRenderer::updateCamera(const Camera& camera) {
     // Check if camera has moved significantly
     float3 pos_diff = camera.origin - last_camera.origin;
@@ -760,11 +811,12 @@ void OptixRenderer::updateCamera(const Camera& camera) {
 
     if (pos_distance > 0.001f || dir_distance > 0.001f) {
         // Camera moved - reset accumulation
-        resetAccumulationBuffer();
+        resetBuffersOnCameraUpdate();
     }
     last_camera = camera;
 }
 
+// Switch to a different scene by loading its configuration, cleaning up old resources, and rebuilding the scene's geometry and SBT.
 void OptixRenderer::switchScene(SceneID scene_id) {
     if (scene_id == current_scene_id) {
         return;  // Already on this scene
@@ -787,35 +839,118 @@ void OptixRenderer::switchScene(SceneID scene_id) {
         current_scene_data.objects.size());
 }
 
-void OptixRenderer::SetupDenoiser() {
+// Denoiser setup function to initialize OptiX denoiser with specified options and allocate necessary GPU buffers for denoising operations. 
+// This function creates an OptiX denoiser, computes memory requirements, allocates GPU memory for the denoiser state and scratch buffers, and sets up the denoiser state for use in rendering.
+// Runs once during renderer initialization to prepare for denoising operations on rendered images.
+void OptixRenderer::setupDenoiser() {
     const OptixDenoiserOptions denoiser_options = {
-        .denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY
+        .guideAlbedo = 1,  // Will expect use guide albedo for better results (added later in OptixDenoiserGuideLayer)
+        .guideNormal = 1,  // Will expect use guide normal for better results (added later in OptixDenoiserGuideLayer)
+        .denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY  // Ignores aplha channel
     };
-    // Set to true if you want to denoise the alpha channel as well
-    OptixDenoiser denoiser;
-    OptixDenoiserModelKind model_kind = OPTIX_DENOISER_MODEL_KIND_HDR;
 
-    OPTIX_CHECK(optixDenoiserCreate(context, model_kind, &denoiser_options, &denoiser));
+	OPTIX_CHECK(optixDenoiserCreate(   // Create an OptiX denoiser with the specified options and store handle in denoiser variable
+        context,                       // Optix device context
+        OPTIX_DENOISER_MODEL_KIND_HDR, // Which denoise model to use
+		&denoiser_options,             // Denoiser options
+		&denoiser));                   // Output denoiser handle
 
-    OptixDenoiserSizes denoiser_sizes;
-    OPTIX_CHECK(optixDenoiserComputeMemoryResources(denoiser, params.width, params.height, &denoiser_sizes));
 
-    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_state, denoiser_sizes.stateSizeInBytes));
-    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_scratch, denoiser_sizes.withoutOverlapScratchSizeInBytes));
+	OPTIX_CHECK(optixDenoiserComputeMemoryResources(  // Compute the memory requirements for the denoiser state and scratch buffers based on the image dimensions and store in denoiser_sizes
+        denoiser,          // Denoiser handle
+		params.width,      // Width of the images to be denoised
+		params.height,     // Height of the images to be denoised
+		&denoiser_sizes)); // Store the computed memory requirements for the denoiser state and scratch buffers in denoiser_sizes
 
-    OPTIX_CHECK(optixDenoiserSetup(
-        denoiser,
-        0,
-        params.width,
-        params.height,
-        device_buffers.d_denoiser_state,
-        denoiser_sizes.stateSizeInBytes,
-        device_buffers.d_denoiser_scratch,
-        denoiser_sizes.withoutOverlapScratchSizeInBytes)
+	CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_state, denoiser_sizes.stateSizeInBytes));                   // Allocate GPU memory for the denoiser state buffer based on the computed size in denoiser_sizes
+	CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoiser_scratch, denoiser_sizes.withoutOverlapScratchSizeInBytes)); // Allocate GPU memory for the denoiser scratch buffer based on the computed size in denoiser_sizes
+
+	OPTIX_CHECK(optixDenoiserSetup( // Setup the denoiser state with the specified image dimensions and allocated buffers
+		denoiser,                   // Denoiser handle
+        0,                          // Cuda stream
+		params.width,               // Width of the images to be denoised
+		params.height,              // Height of the images to be denoised
+		device_buffers.d_denoiser_state,                 // Pointer to the allocated GPU memory for the denoiser state buffer
+		denoiser_sizes.stateSizeInBytes,                 // Size of the denoiser state buffer in bytes
+		device_buffers.d_denoiser_scratch,               // Pointer to the allocated GPU memory for the denoiser scratch buffer
+		denoiser_sizes.withoutOverlapScratchSizeInBytes) // Size of the denoiser scratch buffer in bytes
     );
 
+    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_denoised_buffer, params.width * params.height * sizeof(float4)));
+}
 
+void OptixRenderer::runDenoiser(float blendFactor) {
+    //// Describe input layers
+    OptixDenoiserGuideLayer guide_layer{};
+    guide_layer.albedo.data = (CUdeviceptr)device_buffers.d_albedo_buffer;
+    guide_layer.albedo.width = getWidth();
+    guide_layer.albedo.height = getHeight();
+    guide_layer.albedo.rowStrideInBytes = getWidth() * sizeof(float4);
+    guide_layer.albedo.pixelStrideInBytes = sizeof(float4);
+    guide_layer.albedo.format = OPTIX_PIXEL_FORMAT_FLOAT4;
 
+    guide_layer.normal.data = (CUdeviceptr)device_buffers.d_normal_buffer;
+    guide_layer.normal.width = getWidth();
+    guide_layer.normal.height = getHeight();
+    guide_layer.normal.rowStrideInBytes = getWidth() * sizeof(float4);
+    guide_layer.normal.pixelStrideInBytes = sizeof(float4);
+    guide_layer.normal.format = OPTIX_PIXEL_FORMAT_FLOAT4;
 
-	OPTIX_CHECK(optixDenoiserDestroy(denoiser));
+    // Describe the noisy beauty input and denoised output
+    OptixDenoiserLayer color_layer{};
+    color_layer.input.data = (CUdeviceptr)device_buffers.d_accum_buffer; // your HDR accum
+    color_layer.input.width = getWidth();
+    color_layer.input.height = getHeight();
+    color_layer.input.rowStrideInBytes = getWidth() * sizeof(float4);
+    color_layer.input.pixelStrideInBytes = sizeof(float4);
+    color_layer.input.format = OPTIX_PIXEL_FORMAT_FLOAT4;
+
+    color_layer.output.data = (CUdeviceptr)device_buffers.d_denoised_buffer; // separate output
+    color_layer.output.width = getWidth();
+    color_layer.output.height = getHeight();
+    color_layer.output.rowStrideInBytes = getWidth() * sizeof(float4);
+    color_layer.output.pixelStrideInBytes = sizeof(float4);
+    color_layer.output.format = OPTIX_PIXEL_FORMAT_FLOAT4;
+
+    // Run denoiser
+    OptixDenoiserParams denoiser_params{};
+    denoiser_params.blendFactor = blendFactor; // 0 = full denoiser output, 1 = full noisy input
+
+    optixDenoiserInvoke(
+        denoiser, 
+        0,
+        &denoiser_params,
+        device_buffers.d_denoiser_state,
+        denoiser_sizes.stateSizeInBytes,
+        &guide_layer,
+        &color_layer, 
+        1,    // one color layer
+        0, 0,               // offset x, y (0 for full image)
+        device_buffers.d_denoiser_scratch,
+        denoiser_sizes.withoutOverlapScratchSizeInBytes);
+
+    // //Then tonemap d_denoised_buffer -> your display output
+    // //(run your ACES + sRGB kernel on the denoised HDR output)
+}
+
+void OptixRenderer::postprocessAccum() {
+    launchTonemapKernel(
+        reinterpret_cast<float4*>(device_buffers.d_accum_buffer),
+        reinterpret_cast<uchar4*>(device_buffers.d_pixels),
+        params.width,
+        params.height,
+        0
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void OptixRenderer::postprocessDenoised() {
+    launchTonemapKernel(
+        reinterpret_cast<float4*>(device_buffers.d_denoised_buffer),
+        reinterpret_cast<uchar4*>(device_buffers.d_pixels),
+        params.width,
+        params.height,
+        0
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
 }

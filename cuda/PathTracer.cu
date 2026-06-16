@@ -33,26 +33,26 @@ __device__ float rnd(unsigned int& seed) {
 }
 
 
+
+
+
 // ------------------------------------------------------------------
-// Register layout 
-//   p0..p2  : throughput     (float3,  RW)
-//   p3      : seed           (uint32,  RW)  — lower 32 bits of PCG state
+// Register layout RadiancePRD
+//   p0      : ray_type       (uint32,   R by CH/MS)
+//   p1..p3  : throughput     (float3,   RW)
 //   p4      : done           (uint32,   W by CH/MS, R by caller)
 //   p5..p7  : emitted        (float3,   W by CH/MS)
 //   p8..p10 : radiance       (float3,   W by CH/MS — reserved for NEE)
 //   p11..p13: next_origin    (float3,   W by CH)
 //   p14..p16: next_direction (float3,   W by CH)
 //   p17     : is_specular    (uint32,   W by CH)
-//   p18..p20: albedo         (float3,   W by CH) - (for denoiser)
-//   p21..p23: normal         (float3,   W by CH) - (for denoiser)
 // ------------------------------------------------------------------
 
 static __forceinline__ __device__ void storeClosesthitRadiancePRD(const RadiancePRD& prd)
 {
-    optixSetPayload_0(__float_as_uint(prd.throughput.x));
-    optixSetPayload_1(__float_as_uint(prd.throughput.y));
-    optixSetPayload_2(__float_as_uint(prd.throughput.z));
-    optixSetPayload_3(prd.seed);
+    optixSetPayload_1(__float_as_uint(prd.throughput.x));
+    optixSetPayload_2(__float_as_uint(prd.throughput.y));
+    optixSetPayload_3(__float_as_uint(prd.throughput.z));
     optixSetPayload_4(prd.done);
     optixSetPayload_5(__float_as_uint(prd.emitted.x));
     optixSetPayload_6(__float_as_uint(prd.emitted.y));
@@ -72,10 +72,9 @@ static __forceinline__ __device__ void storeClosesthitRadiancePRD(const Radiance
 static __forceinline__ __device__ RadiancePRD loadClosesthitRadiancePRD()
 {
     RadiancePRD prd = {};
-    prd.throughput.x = __uint_as_float(optixGetPayload_0());
-    prd.throughput.y = __uint_as_float(optixGetPayload_1());
-    prd.throughput.z = __uint_as_float(optixGetPayload_2());
-    prd.seed = optixGetPayload_3();
+    prd.throughput.x = __uint_as_float(optixGetPayload_1());
+    prd.throughput.y = __uint_as_float(optixGetPayload_2());
+    prd.throughput.z = __uint_as_float(optixGetPayload_3());
     return prd;
 }
 
@@ -93,7 +92,7 @@ static __forceinline__ __device__ void storeMissRadiancePRD(const RadiancePRD& p
 
 static __forceinline__ __device__ RadiancePRD loadMissRadiancePRD()
 {
-    // Miss only reads what the caller passed in (nothing currently)
+    // Miss only reads what the caller passed
     RadiancePRD prd = {};
     return prd;
 }
@@ -110,10 +109,10 @@ static __forceinline__ __device__ void traceRadiance(
     float                  tmax,
     RadiancePRD& prd)
 {
-    unsigned int u0 = __float_as_uint(prd.throughput.x);
-    unsigned int u1 = __float_as_uint(prd.throughput.y);
-    unsigned int u2 = __float_as_uint(prd.throughput.z);
-    unsigned int u3 = prd.seed;
+	unsigned int u0 = prd.ray_type;
+    unsigned int u1 = __float_as_uint(prd.throughput.x);
+    unsigned int u2 = __float_as_uint(prd.throughput.y);
+    unsigned int u3 = __float_as_uint(prd.throughput.z);
     unsigned int u4 = 0u;                               // done
     unsigned int u5 = 0u, u6 = 0u, u7 = 0u;          // emitted
     unsigned int u8 = 0u, u9 = 0u, u10 = 0u;          // radiance
@@ -147,10 +146,10 @@ static __forceinline__ __device__ void traceRadiance(
     );
 
     // Unpack outputs back into prd
-    prd.throughput.x = __uint_as_float(u0);
-    prd.throughput.y = __uint_as_float(u1);
-    prd.throughput.z = __uint_as_float(u2);
-    prd.seed = u3;
+	prd.ray_type = u0;
+    prd.throughput.x = __uint_as_float(u1);
+    prd.throughput.y = __uint_as_float(u2);
+    prd.throughput.z = __uint_as_float(u3);
     prd.done = u4;
     prd.emitted.x = __uint_as_float(u5);
     prd.emitted.y = __uint_as_float(u6);
@@ -165,6 +164,88 @@ static __forceinline__ __device__ void traceRadiance(
     prd.next_direction.y = __uint_as_float(u15);
     prd.next_direction.z = __uint_as_float(u16);
     prd.is_specular = u17;
+}
+
+
+// ------------------------------------------------------------------
+// Register layout DenoiserGuidePRD
+//   p0      : ray_type       (uint32,   R by CH/MS)
+//   p1..p3  : albedo         (float3,   RW)
+//   p4..p6  : normal         (float3,   RW)
+// ------------------------------------------------------------------
+
+static __forceinline__ __device__ void storeClosesthitDenoiserGuidePRD(const DenoiserGuidePRD& prd)
+{
+    optixSetPayload_1(__float_as_uint(prd.albedo.x));
+    optixSetPayload_2(__float_as_uint(prd.albedo.y));
+    optixSetPayload_3(__float_as_uint(prd.albedo.z));
+    optixSetPayload_4(__float_as_uint(prd.normal.x));
+    optixSetPayload_5(__float_as_uint(prd.normal.y));
+    optixSetPayload_6(__float_as_uint(prd.normal.z));
+}
+
+static __forceinline__ __device__ DenoiserGuidePRD loadClosesthitDenoiserGuidePRD()
+{
+    DenoiserGuidePRD prd = {};
+    return prd;
+}
+
+static __forceinline__ __device__ DenoiserGuidePRD loadMissDenoiserGuidePRD()
+{
+    // Miss only reads what the caller passed in
+    DenoiserGuidePRD prd = {};
+    return prd;
+}
+// ------------------------------------------------------------------
+// traceDenoiserGuide — fires a ray and returns filled DenoiserGuidePRD
+// ------------------------------------------------------------------
+static __forceinline__ __device__ void traceDenoiserGuide(
+    OptixTraversableHandle handle,
+    float3                 ray_origin,
+    float3                 ray_direction,
+    float                  tmin,
+    float                  tmax,
+    DenoiserGuidePRD& prd)
+{
+    unsigned int u0 = prd.ray_type;
+    unsigned int u1 = __float_as_uint(prd.albedo.x);
+    unsigned int u2 = __float_as_uint(prd.albedo.y);
+    unsigned int u3 = __float_as_uint(prd.albedo.z);
+    unsigned int u4 = __float_as_uint(prd.normal.x);
+    unsigned int u5 = __float_as_uint(prd.normal.y);
+    unsigned int u6 = __float_as_uint(prd.normal.z);
+
+    optixTraverse(
+        handle,
+        ray_origin,
+        ray_direction,
+        tmin,
+        tmax,
+        0.f,                    // ray time
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_NONE,
+        0,                      // SBT offset  (ray type 0)
+        1,                      // SBT stride
+        0,                      // miss SBT index
+        u0, 
+        u1, u2, u3, 
+        u4, u5, u6
+    );
+    optixReorder();
+    optixInvoke(
+        u0, 
+        u1, u2, u3, 
+        u4, u5, u6
+    );
+
+    // Unpack outputs back into prd
+	prd.ray_type = u0;
+	prd.albedo.x = __uint_as_float(u1);
+	prd.albedo.y = __uint_as_float(u2);
+	prd.albedo.z = __uint_as_float(u3);
+	prd.normal.x = __uint_as_float(u4);
+	prd.normal.y = __uint_as_float(u5);
+	prd.normal.z = __uint_as_float(u6);
 }
 
 
@@ -248,6 +329,16 @@ static __forceinline__ __device__ float3 getBaseColor(
         return make_float3(t.x, t.y, t.z);
     }
     return sbt->base_color;
+}
+
+static __forceinline__ __device__ float3 getTint(
+    const HitGroupDataGlass* sbt, float2 uv)
+{
+    if (sbt->tint_texture != 0) {
+        float4 t = tex2D<float4>(sbt->tint_texture, uv.x, uv.y);
+        return make_float3(t.x, t.y, t.z);
+    }
+    return sbt->tint;
 }
 
 // Returns scalar roughness. Texture (R channel) takes priority.
@@ -478,8 +569,7 @@ extern "C" __global__ void __raygen__pathTracer()
     // Accumulation across frames is handled below via the running average.
     float3 frame_color = make_float3(0.f, 0.f, 0.f);
 
-    for (int s = 0; s < params.samples_per_pixel; ++s)
-    {        
+    for (int s = 0; s < params.samples_per_pixel; ++s){        
         // Unique seed: XOR of pixel coords, frame seed, sample index
         unsigned int seed = params.random_seed ^ (idx.x * 73856093u) ^ (idx.y * 19349663u) ^ ((unsigned int)s * 83492791u);
 
@@ -500,13 +590,12 @@ extern "C" __global__ void __raygen__pathTracer()
         float3 radiance = make_float3(0.f, 0.f, 0.f);
 
         // Iterative bounce loop
-        for (int bounce = 0; bounce <= params.max_bounce_depth; ++bounce)
-        {
+        for (int bounce = 0; bounce <= params.max_bounce_depth; ++bounce){
             // Initialize payload for this trace call.
             // throughput and seed are passed IN to the CH shader.
             RadiancePRD prd = {};
             prd.throughput = throughput;
-            prd.seed = rnd(seed);  // pass a fresh random word to CH
+            prd.ray_type = 0;  // Set the ray type for this path
             prd.done = 0u;
 
             traceRadiance(
@@ -536,8 +625,7 @@ extern "C" __global__ void __raygen__pathTracer()
             // Russian Roulette path termination 
             // Skip RR for the first rr_start_depth bounces to avoid bias
             // on direct and first-indirect lighting.
-            if (bounce >= params.rr_start_depth)
-            {
+            if (bounce >= params.rr_start_depth){
                 float q = fmaxf(0.05f, 1.0f - luminance(throughput));
                 if (rnd(seed) < q)
                     break;
@@ -563,13 +651,11 @@ extern "C" __global__ void __raygen__pathTracer()
     // Formula: accum = accum + (new - accum) / (n + 1)
     // This is equivalent to a weighted average of all samples so far.
     float3 accumulated;
-    if (params.current_sample == 0)
-    {
+    if (params.current_sample == 0){
         accumulated = frame_color;
     }
-    else
-    {
-        float3 prev = params.accum_buffer[pixel_index];
+    else{
+        float3 prev = make_float3(params.accum_buffer[pixel_index].x, params.accum_buffer[pixel_index].y, params.accum_buffer[pixel_index].z);
         float  w = 1.0f / (float)(params.current_sample + 1);
         accumulated = make_float3(
             prev.x + (frame_color.x - prev.x) * w,
@@ -577,10 +663,50 @@ extern "C" __global__ void __raygen__pathTracer()
             prev.z + (frame_color.z - prev.z) * w
         );
     }
-    params.accum_buffer[pixel_index] = make_float3(accumulated.x, accumulated.y, accumulated.z);
+    
+    // Trace for denoiser guide buffers (albedo, normal) on the first sample only
+    if (params.current_sample == 0){
+        float u = (float)idx.x / (float)params.width;
+        float v = (float)idx.y / (float)params.height;
+
+        float3 ray_origin = params.camera.origin;
+        float3 ray_dir = normalize(
+            params.camera.lower_left_corner
+            + u * params.camera.horizontal
+            + v * params.camera.vertical
+            - params.camera.origin
+        );
+
+        // Path state
+
+
+        DenoiserGuidePRD prd = {};
+		prd.ray_type = 1;  // Set the ray type for denoiser guide
+        prd.albedo = make_float3(0.f, 0.f, 0.f);
+        prd.normal = make_float3(0.f, 0.f, 0.f);
+
+        traceDenoiserGuide(
+            params.traversable,
+            ray_origin,
+            ray_dir,
+            EPS,
+            1e16f,
+            prd
+        );
+
+		float3 albedo = prd.albedo;
+		float3 normal = prd.normal;
+
+        params.albedo_buffer[pixel_index] = make_float4(albedo.x, albedo.y, albedo.z, 1.0f);
+        params.normal_buffer[pixel_index] = make_float4(normal.x, normal.y, normal.z, 1.0f);
+    }
+
+    params.accum_buffer[pixel_index] = make_float4(accumulated.x, accumulated.y, accumulated.z, 1.0f);
 
     // Tonemap and write to display buffer 
-    params.image[pixel_index] = convertToFinalSRGB(accumulated);
+    //params.image[pixel_index] = convertToFinalSRGB(accumulated);
+    //params.image[pixel_index] = convertToFinalSRGB(make_float3(params.albedo_buffer[pixel_index].x,params.albedo_buffer[pixel_index].y,params.albedo_buffer[pixel_index].z));
+    //params.image[pixel_index] = convertToFinalSRGB(make_float3(params.normal_buffer[pixel_index].x, params.normal_buffer[pixel_index].y,params.normal_buffer[pixel_index].z));
 }
 
 
@@ -589,6 +715,11 @@ extern "C" __global__ void __raygen__pathTracer()
 // ==================================================================================
 extern "C" __global__ void __miss__envMap()
 {
+    unsigned int ray_type = optixGetPayload_0();
+    if (ray_type == 1) {
+        return;
+    }
+
     RadiancePRD prd = loadMissRadiancePRD();
 
     float3 ray_dir = normalize(optixGetWorldRayDirection());
@@ -631,6 +762,18 @@ extern "C" __global__ void __closesthit__cookTorrance()
 {
     const HitGroupDataCookTorrance* sbt =
         (const HitGroupDataCookTorrance*)optixGetSbtDataPointer();
+
+    unsigned int ray_type = optixGetPayload_0();
+    if (ray_type == 1) {
+		DenoiserGuidePRD prd = loadClosesthitDenoiserGuidePRD();
+        const float3 ray_dir = normalize(optixGetWorldRayDirection());
+
+        const float2 uv = getInterpolatedUV(sbt);
+        prd.albedo = getBaseColor(sbt, uv);
+        prd.normal = getInterpolatedNormal(sbt, ray_dir);  // world space, flipped
+        storeClosesthitDenoiserGuidePRD(prd);
+        return;
+    }
 
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
@@ -812,12 +955,20 @@ extern "C" __global__ void __anyhit__opacity()
 
     const float2 uv = getInterpolatedUV(sbt);
 
-    // Sample alpha
-    float3 alpha_color = getAlpha(sbt, uv);
-	float alpha = luminance(alpha_color);  // Assuming alpha is stored in RGB channels as a grayscale value
+    const float3 ray_dir = normalize(optixGetWorldRayDirection());
+    const float3 hit_pos = optixGetWorldRayOrigin()
+        + optixGetRayTmax() * ray_dir;
+    unsigned int seed = params.random_seed
+        ^ (optixGetLaunchIndex().x * 73856093u)
+        ^ (optixGetLaunchIndex().y * 19349663u)
+        ^ (params.current_sample * 83492791u)
+        ^ __float_as_uint(hit_pos.x + hit_pos.y);
+    float rand_val = rnd(seed);
 
-    const float alpha_threshold = 0.05f;
-    if(alpha < alpha_threshold)
+    // Sample alpha
+	float alpha = luminance(getAlpha(sbt, uv));  // Assuming alpha is stored in RGB channels as a grayscale value
+
+    if(alpha < rand_val)
     {
         optixIgnoreIntersection();
     }
@@ -840,6 +991,18 @@ extern "C" __global__ void __closesthit__glass()
 {
     const HitGroupDataGlass* sbt =
         (const HitGroupDataGlass*)optixGetSbtDataPointer();
+
+    unsigned int ray_type = optixGetPayload_0();
+    if (ray_type == 1) {
+        DenoiserGuidePRD prd = loadClosesthitDenoiserGuidePRD();
+        const float3 ray_dir = normalize(optixGetWorldRayDirection());
+
+        const float2 uv = getInterpolatedUV(sbt);
+        prd.albedo = getTint(sbt, uv);
+        prd.normal = getInterpolatedNormal(sbt, ray_dir);  // world space, flipped
+        storeClosesthitDenoiserGuidePRD(prd);
+        return;
+    }
 
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
@@ -916,7 +1079,7 @@ extern "C" __global__ void __closesthit__glass()
     }
 
     // Fill payload 
-    prd.throughput = prd.throughput * sbt->tint;
+    prd.throughput = prd.throughput * getTint(sbt, uv);
     prd.next_origin = next_origin;
     prd.next_direction = normalize(scattered);
     prd.radiance = make_float3(0.f);
