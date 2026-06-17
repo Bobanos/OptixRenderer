@@ -36,13 +36,10 @@ struct SceneData {
 
     // Camera settings
 	float3 camera_position = make_float3(0.0f, 1.0f, 4.0f);
-	float3 camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+	float3 camera_front = make_float3(0.0f, 0.0f, 0.0f);
 	float3 camera_up = make_float3(0.0f, 1.0f, 0.0f);
 	float camera_vfov = 60.0f;
 
-    // Lighting setup
-    //int num_lights;
-    //Light lights[4];
 	float envmap_scale = 1.0f;
 	float envmap_exposure = 0.0f;
 
@@ -79,7 +76,7 @@ private:
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
         scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
-        scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+        scene.camera_front = make_float3(-0.86f, 0.33f, -0.38f);
         scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
         scene.camera_vfov = 60.0f;
 
@@ -129,7 +126,7 @@ private:
         scene.envmap_path = "";
 
         scene.camera_position = make_float3(0.0f, 0.7f, 2.5f);
-        scene.camera_lookat = make_float3(0.0f, -1.0f, 0.0f);
+        scene.camera_front = make_float3(0.0f, -1.0f, 0.0f);
         scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
         scene.camera_vfov = 60.0f;
 
@@ -157,7 +154,7 @@ private:
         scene.envmap_path = "assets/moonless_golf_2k.hdr";
 
         scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
-        scene.camera_lookat = make_float3(0.0f, 0.0f, 0.0f);
+        scene.camera_front = make_float3(0.0f, 0.0f, 0.0f);
         scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
         scene.camera_vfov = 60.0f;
 
@@ -184,7 +181,7 @@ private:
         scene.name = "LumberYard Bistro";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
         scene.camera_position = make_float3(-8.0f, 6.0f, 6.0f);
-        scene.camera_lookat = make_float3(0.0f, -3.0f, 0.0f);
+        scene.camera_front = make_float3(0.0f, -3.0f, 0.0f);
 
         SceneObject street;
         street.name = "Street";
@@ -198,7 +195,7 @@ private:
         room.obj_path = "assets/lumberyard/interior.obj";
         room.base_dir = "assets/lumberyard";
 		room.scale = make_float3(0.01f, 0.01f, 0.01f);
-        scene.objects.push_back(room);
+        //scene.objects.push_back(room);
 
 		return scene;
     }
@@ -210,7 +207,7 @@ private:
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
         scene.camera_position = make_float3(3.0f, 3.0f, 7.5f);
-		scene.camera_lookat = make_float3(0.0f, -2.6f, 0.0f);
+		scene.camera_front = make_float3(0.0f, -2.6f, 0.0f);
 
         SceneObject obj;
 		obj.name = "Spitfire Company";

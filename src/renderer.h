@@ -176,6 +176,13 @@ private:
     cudaArray_t envmap_cdf_conditional_array = nullptr;
 
     // Helper methods
+    bool buildOMMData(
+        const LoadedSceneObject& object, 
+        int subdivision_level,
+        std::vector<uint8_t>& packed_states,
+        std::vector<OptixOpacityMicromapDesc>& descs,
+        std::vector<uint32_t>& index_buffer);
+
     void createModuleAndProgramGroups();
     void createPipeline();
     void uploadSceneObject(LoadedSceneObject& obj);

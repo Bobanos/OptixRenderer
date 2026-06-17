@@ -271,7 +271,7 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-		renderer->loadScene(SceneID::SPITFIRE_COMPANY);
+		renderer->loadScene(SceneID::ALLIED_AVENGER);
         renderer->setupShaders();
         renderer->setupLighting();
 
@@ -286,12 +286,14 @@ int main() {
         // Camera setup
         CameraController camera_controller(
             initial_scene.camera_position,
-            initial_scene.camera_lookat,
+            initial_scene.camera_front,
             initial_scene.camera_up,
             initial_scene.camera_vfov,
             (float)width / (float)height
         );
         g_camera = &camera_controller;
+
+        g_camera->setFront(initial_scene.camera_front);
 
         // Timing
         float deltaTime = 0.0f;
@@ -369,8 +371,8 @@ int main() {
             float3 pos = camera_controller.getPosition();
             ImGui::Text("Position: (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
 
-            float3 look = camera_controller.getLookAt();
-            ImGui::Text("LookAt: (%.2f, %.2f, %.2f)", look.x, look.y, look.z);
+            float3 look = camera_controller.getFront();
+            ImGui::Text("Front: (%.2f, %.2f, %.2f)", look.x, look.y, look.z);
             ImGui::Text("Samples Accumulated: (%.2d)", renderer->getCurrentSample());
             ImGui::Text("Speed: %.2f", camera_controller.getSpeed());
 
@@ -412,6 +414,53 @@ int main() {
                 ImGui::SetTooltip("Saves current viewport to screenshots/ folder as PPM");
             }
             ImGui::Separator();
+
+            // Save Camera Values Button
+            if (ImGui::Button("Save Camera Values", ImVec2(-1, 0))) {
+                // Ensure logs directory exists
+                std::filesystem::create_directories("logs");
+
+                // Create log file with timestamp
+                auto now = std::chrono::system_clock::now();
+                auto time = std::chrono::system_clock::to_time_t(now);
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()) % 1000;
+
+                std::stringstream clipboard_text;
+                clipboard_text << "scene.camera_position = make_float3("
+                    << std::fixed << std::setprecision(2)
+                    << pos.x << "f, " << pos.y << "f, " << pos.z << "f)\n";
+                clipboard_text << "scene.camera_front = make_float3(" << std::fixed << std::setprecision(2)
+                    << look.x << "f, " << look.y << "f, " << look.z << "f)\n";
+
+                // Copy to clipboard using ImGui
+                ImGui::SetClipboardText(clipboard_text.str().c_str());
+
+                std::tm* timeinfo = std::localtime(&time);
+                // Single log file for all camera saves (append mode)
+                std::string log_filename = "logs/camera_values.txt";
+
+                // Write camera values to log file
+                std::ofstream log_file(log_filename, std::ios::app);
+                if (log_file) {
+                    log_file << "=====================================\n";
+                    log_file << "Scene: " << renderer->getCurrentSceneName() << "\n";
+                    log_file << "Timestamp: " << std::put_time(timeinfo, "%Y-%m-%d %H:%M:%S") << "\n\n";
+                    log_file << clipboard_text.str();
+                    log_file.close();
+                    std::cout << "[Camera] Saved to: " << log_filename << std::endl;
+                }
+                else {
+                    std::cerr << "[Camera] Failed to open log file: " << log_filename << std::endl;
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Saves current camera position and lookAt to logs/ folder");
+            }
+
+
             ImGui::SetNextItemWidth(100.0f);
             if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
                 spp_input = fmaxf(1, spp_input);
@@ -479,7 +528,7 @@ int main() {
                 if (ImGui::RadioButton(iter_scene.name.c_str(), (int*)&selected_scene, (int)static_cast<SceneID>(i))) {
                     renderer->switchScene(static_cast<SceneID>(i));
 					camera_controller.setPosition(iter_scene.camera_position);
-                    camera_controller.setLookAt(iter_scene.camera_lookat);
+                    camera_controller.setFront(iter_scene.camera_front);
                     renderer->resetBuffersOnCameraUpdate();
                 }
             }

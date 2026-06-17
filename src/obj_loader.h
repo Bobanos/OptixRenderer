@@ -60,6 +60,10 @@ struct LoadedSceneObject {
     CUdeviceptr d_sbt_indices = 0;
     CUdeviceptr d_gas_output = 0;
 
+    // OMM GPU buffers
+    CUdeviceptr d_omm_array_output = 0;
+    CUdeviceptr d_omm_index_buffer = 0;
+
     OptixTraversableHandle gas_handle = 0;
     uint32_t               sbt_base = 0;
     float                  transform[12] = { 1,0,0,0, 

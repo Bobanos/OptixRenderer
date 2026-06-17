@@ -1,11 +1,5 @@
 #include "camera.h"
 
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-
 CameraController::CameraController(float3 position, float3 look_at, float3 up, float vfov, float aspect_ratio)
         : position(position), look_at(look_at), world_up(up),vfov(vfov), aspect_ratio(aspect_ratio),
         yaw(-90.0f), pitch(0.0f), movement_speed(2.5f), mouse_sensitivity(0.1f),
@@ -89,6 +83,9 @@ void CameraController::updateCameraVectors() {
     new_front.y = std::sin(pitch * M_PI / 180.0f);
     new_front.z = std::sin(yaw * M_PI / 180.0f) * std::cos(pitch * M_PI / 180.0f);
     front = normalize(new_front);
+
+    // Update look_at to point 1 unit in front of the camera
+    look_at = position + front;
 
     // Recalculate right and up vectors
     right = normalize(cross(front, world_up));

@@ -61,14 +61,16 @@ constexpr unsigned int RAY_TYPE_COUNT = 1;
 // RadiancePRD payload layout
 //
 // Register map (18 registers total):
-//   p0      : ray_type       (uint32,   R by CH/MS)
-//   p1..p3  : throughput     (float3,   RW)
+//   p0      : ray_type         (uint32, R by CH/MS)
+//   p1..p3  : throughput       (float3, RW)
 //   p4       : done            (uint,   W by CH and MS, R by caller)
 //   p5..p7   : emitted         (float3, W by CH and MS, R by caller)
 //   p8..p10  : radiance        (float3, W by CH and MS, R by caller - unused for now, kept for NEE)
 //   p11..p13 : next_origin     (float3, W by CH, R by caller)
 //   p14..p16 : next_direction  (float3, W by CH, R by caller)
 //   p17      : is_specular     (uint,   W by CH, R by caller - for MIS later)
+//   p18..p20 : albedo          (float3, W by CH, R by caller - for denoiser guide)
+//   p21..p23 : normal          (float3, W by CH, R by caller - for denoiser guide)
 // ------------------------------------------------------------------
 
 // ------------------------------------------------------------------
@@ -87,13 +89,8 @@ struct RadiancePRD
     float3       next_origin;   // scattered ray origin
     float3       next_direction;// scattered ray direction
     unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
-};
-
-struct DenoiserGuidePRD
-{
-	unsigned int ray_type;
-    float3 albedo;  // RGB = base color
-    float3 normal;  // RGB = normal
+	float3       albedo;        // Base color for diffuse materials, used for denoiser guide
+	float3       normal;        // Surface normal at hit point, used for denoiser guide
 };
 
 //struct ShadowPRD
@@ -112,7 +109,6 @@ struct HitGroupDataCommon
 {
     ColoredVertex* vertices;
     uint3* indices; 
-	//float3 albedo;  // Base color (if no texture)
 	float3 emission;  // Emissive color (can be > 1 for bright materials)
 	cudaTextureObject_t emission_texture; // 0 = no texture, use emission color
 };

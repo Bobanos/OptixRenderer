@@ -32,10 +32,6 @@ __device__ float rnd(unsigned int& seed) {
     return (lcg_next(seed) & 0xFFFFFF) / 16777216.0f;
 }
 
-
-
-
-
 // ------------------------------------------------------------------
 // Register layout RadiancePRD
 //   p0      : ray_type       (uint32,   R by CH/MS)
@@ -46,6 +42,8 @@ __device__ float rnd(unsigned int& seed) {
 //   p11..p13: next_origin    (float3,   W by CH)
 //   p14..p16: next_direction (float3,   W by CH)
 //   p17     : is_specular    (uint32,   W by CH)
+//   p18..p20: albedo         (float3,   W by CH, R by caller - for denoiser guide)
+//   p21..p23: normal         (float3,   W by CH, R by caller - for denoiser guide)
 // ------------------------------------------------------------------
 
 static __forceinline__ __device__ void storeClosesthitRadiancePRD(const RadiancePRD& prd)
@@ -67,6 +65,12 @@ static __forceinline__ __device__ void storeClosesthitRadiancePRD(const Radiance
     optixSetPayload_15(__float_as_uint(prd.next_direction.y));
     optixSetPayload_16(__float_as_uint(prd.next_direction.z));
     optixSetPayload_17(prd.is_specular);
+    optixSetPayload_18(__float_as_uint(prd.albedo.x));
+    optixSetPayload_19(__float_as_uint(prd.albedo.y));
+    optixSetPayload_20(__float_as_uint(prd.albedo.z));
+    optixSetPayload_21(__float_as_uint(prd.normal.x));
+    optixSetPayload_22(__float_as_uint(prd.normal.y));
+    optixSetPayload_23(__float_as_uint(prd.normal.z));
 }
 
 static __forceinline__ __device__ RadiancePRD loadClosesthitRadiancePRD()
@@ -113,12 +117,14 @@ static __forceinline__ __device__ void traceRadiance(
     unsigned int u1 = __float_as_uint(prd.throughput.x);
     unsigned int u2 = __float_as_uint(prd.throughput.y);
     unsigned int u3 = __float_as_uint(prd.throughput.z);
-    unsigned int u4 = 0u;                               // done
-    unsigned int u5 = 0u, u6 = 0u, u7 = 0u;          // emitted
-    unsigned int u8 = 0u, u9 = 0u, u10 = 0u;          // radiance
-    unsigned int u11 = 0u, u12 = 0u, u13 = 0u;          // next_origin
-    unsigned int u14 = 0u, u15 = 0u, u16 = 0u;          // next_direction
+    unsigned int u4 = 0u;                                // done
+    unsigned int u5 = 0u, u6 = 0u, u7 = 0u;              // emitted
+    unsigned int u8 = 0u, u9 = 0u, u10 = 0u;             // radiance
+    unsigned int u11 = 0u, u12 = 0u, u13 = 0u;           // next_origin
+    unsigned int u14 = 0u, u15 = 0u, u16 = 0u;           // next_direction
     unsigned int u17 = 0u;                               // is_specular
+    unsigned int u18 = 0u, u19 = 0u, u20 = 0u;           // albedo
+    unsigned int u21 = 0u, u22 = 0u, u23 = 0u;           // normal
 
     optixTraverse(
         handle,
@@ -135,14 +141,16 @@ static __forceinline__ __device__ void traceRadiance(
         u0, u1, u2, u3, u4,
         u5, u6, u7, u8, u9,
         u10, u11, u12, u13, u14,
-        u15, u16, u17
+        u15, u16, u17, u18, u19,
+        u20, u21, u22, u23
     );
     optixReorder();
     optixInvoke(
         u0, u1, u2, u3, u4,
         u5, u6, u7, u8, u9,
         u10, u11, u12, u13, u14,
-        u15, u16, u17
+        u15, u16, u17, u18, u19,
+        u20, u21, u22, u23
     );
 
     // Unpack outputs back into prd
@@ -164,124 +172,67 @@ static __forceinline__ __device__ void traceRadiance(
     prd.next_direction.y = __uint_as_float(u15);
     prd.next_direction.z = __uint_as_float(u16);
     prd.is_specular = u17;
+    prd.albedo.x = __uint_as_float(u18);
+    prd.albedo.y = __uint_as_float(u19);
+    prd.albedo.z = __uint_as_float(u20);
+    prd.normal.x = __uint_as_float(u21);
+    prd.normal.y = __uint_as_float(u22);
+    prd.normal.z = __uint_as_float(u23);
 }
-
-
-// ------------------------------------------------------------------
-// Register layout DenoiserGuidePRD
-//   p0      : ray_type       (uint32,   R by CH/MS)
-//   p1..p3  : albedo         (float3,   RW)
-//   p4..p6  : normal         (float3,   RW)
-// ------------------------------------------------------------------
-
-static __forceinline__ __device__ void storeClosesthitDenoiserGuidePRD(const DenoiserGuidePRD& prd)
-{
-    optixSetPayload_1(__float_as_uint(prd.albedo.x));
-    optixSetPayload_2(__float_as_uint(prd.albedo.y));
-    optixSetPayload_3(__float_as_uint(prd.albedo.z));
-    optixSetPayload_4(__float_as_uint(prd.normal.x));
-    optixSetPayload_5(__float_as_uint(prd.normal.y));
-    optixSetPayload_6(__float_as_uint(prd.normal.z));
-}
-
-static __forceinline__ __device__ DenoiserGuidePRD loadClosesthitDenoiserGuidePRD()
-{
-    DenoiserGuidePRD prd = {};
-    return prd;
-}
-
-static __forceinline__ __device__ DenoiserGuidePRD loadMissDenoiserGuidePRD()
-{
-    // Miss only reads what the caller passed in
-    DenoiserGuidePRD prd = {};
-    return prd;
-}
-// ------------------------------------------------------------------
-// traceDenoiserGuide — fires a ray and returns filled DenoiserGuidePRD
-// ------------------------------------------------------------------
-static __forceinline__ __device__ void traceDenoiserGuide(
-    OptixTraversableHandle handle,
-    float3                 ray_origin,
-    float3                 ray_direction,
-    float                  tmin,
-    float                  tmax,
-    DenoiserGuidePRD& prd)
-{
-    unsigned int u0 = prd.ray_type;
-    unsigned int u1 = __float_as_uint(prd.albedo.x);
-    unsigned int u2 = __float_as_uint(prd.albedo.y);
-    unsigned int u3 = __float_as_uint(prd.albedo.z);
-    unsigned int u4 = __float_as_uint(prd.normal.x);
-    unsigned int u5 = __float_as_uint(prd.normal.y);
-    unsigned int u6 = __float_as_uint(prd.normal.z);
-
-    optixTraverse(
-        handle,
-        ray_origin,
-        ray_direction,
-        tmin,
-        tmax,
-        0.f,                    // ray time
-        OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_NONE,
-        0,                      // SBT offset  (ray type 0)
-        1,                      // SBT stride
-        0,                      // miss SBT index
-        u0, 
-        u1, u2, u3, 
-        u4, u5, u6
-    );
-    optixReorder();
-    optixInvoke(
-        u0, 
-        u1, u2, u3, 
-        u4, u5, u6
-    );
-
-    // Unpack outputs back into prd
-	prd.ray_type = u0;
-	prd.albedo.x = __uint_as_float(u1);
-	prd.albedo.y = __uint_as_float(u2);
-	prd.albedo.z = __uint_as_float(u3);
-	prd.normal.x = __uint_as_float(u4);
-	prd.normal.y = __uint_as_float(u5);
-	prd.normal.z = __uint_as_float(u6);
-}
-
 
 // ------------------------------------------------------------------
 // Geometry helpers — shared by both hit programs
 // ------------------------------------------------------------------
 
+static __forceinline__ __device__ float3 getGeometricNormal(const HitGroupDataCommon* sbt) {
+    const int prim_idx = optixGetPrimitiveIndex();
+    const uint3 tri = sbt->indices[prim_idx];
+    const float3 v0 = sbt->vertices[tri.x].position;
+    const float3 v1 = sbt->vertices[tri.y].position;
+    const float3 v2 = sbt->vertices[tri.z].position;
+    const float3 edge1 = v1 - v0;
+    const float3 edge2 = v2 - v0;
+
+    // The cross product of the edges gives the raw perpendicular object-space normal.
+    // The order (edge1 x edge2) matters! It defines the "front" face 
+    // based on clockwise vs counter-clockwise vertex winding order.
+    float3 n_object = cross(edge1, edge2);
+    return normalize(optixTransformNormalFromObjectToWorldSpace(n_object));
+}
+
 // Interpolate shading normal from vertex buffer using barycentrics.
 // Flips toward the incoming ray (two-sided shading).
 static __forceinline__ __device__ float3 getInterpolatedNormal(
     const HitGroupDataCommon* sbt,
-    const float3& ray_dir)
-{
+    const float3& ray_dir){
     const int    prim_idx = optixGetPrimitiveIndex();
     const uint3  tri = sbt->indices[prim_idx];
     const float2 bary = optixGetTriangleBarycentrics();
     const float  b0 = 1.f - bary.x - bary.y;
 
-    float3 n = normalize(
-        b0 * sbt->vertices[tri.x].normal +
-        bary.x * sbt->vertices[tri.y].normal +
-        bary.y * sbt->vertices[tri.z].normal
-    );
+    // Linearly interpolate raw object-space normals
+    float3 n = b0     * sbt->vertices[tri.x].normal +
+               bary.x * sbt->vertices[tri.y].normal +
+               bary.y * sbt->vertices[tri.z].normal;
     n = normalize(optixTransformNormalFromObjectToWorldSpace(n));
 
     // Flip if ray hits back face (two-sided)
     if (dot(n, ray_dir) > 0.f)
         n = -n;
 
+    if (dot(n, n) < 1e-4f)
+    {
+        n = getGeometricNormal(sbt);
+        if (dot(n, ray_dir) > 0.f)
+            n = -n;
+    }
+
     return n;
 }
 
 // Interpolate UV coordinates across the triangle.
 static __forceinline__ __device__ float2 getInterpolatedUV(
-    const HitGroupDataCommon* sbt)
-{
+    const HitGroupDataCommon* sbt){
     const int    prim_idx = optixGetPrimitiveIndex();
     const uint3  tri = sbt->indices[prim_idx];
     const float2 bary = optixGetTriangleBarycentrics();
@@ -295,8 +246,7 @@ static __forceinline__ __device__ float2 getInterpolatedUV(
 
 // Sample emissive — texture takes priority over constant.
 static __forceinline__ __device__ float3 getEmissive(
-    const HitGroupDataCommon* sbt, float2 uv)
-{
+    const HitGroupDataCommon* sbt, float2 uv){
     if (sbt->emission_texture != 0) {
         float4 t = tex2D<float4>(sbt->emission_texture, uv.x, uv.y);
         return make_float3(t.x, t.y, t.z);
@@ -306,8 +256,7 @@ static __forceinline__ __device__ float3 getEmissive(
 
 // Sample alpha.
 static __forceinline__ __device__ float3 getAlpha(
-    const HitGroupDataCookTorrance* sbt, float2 uv)
-{
+    const HitGroupDataCookTorrance* sbt, float2 uv){
     if (sbt->alpha_texture != 0) {
         float4 t = tex2D<float4>(sbt->alpha_texture, uv.x, uv.y);
 		return make_float3(t.x, t.y, t.z);  // Assuming alpha is in RGB channels, returns (alpha, alpha, alpha)
@@ -322,8 +271,7 @@ static __forceinline__ __device__ float3 getAlpha(
 // Returns base color sampled from texture
 // Falls back to sbt->base_color if no texture.
 static __forceinline__ __device__ float3 getBaseColor(
-    const HitGroupDataCookTorrance* sbt, float2 uv)
-{
+    const HitGroupDataCookTorrance* sbt, float2 uv){
     if (sbt->albedo_texture != 0) {
         float4 t = tex2D<float4>(sbt->albedo_texture, uv.x, uv.y);
         return make_float3(t.x, t.y, t.z);
@@ -568,6 +516,8 @@ extern "C" __global__ void __raygen__pathTracer()
     // Per-pixel sample loop
     // Accumulation across frames is handled below via the running average.
     float3 frame_color = make_float3(0.f, 0.f, 0.f);
+    float3 frame_albedo = make_float3(0.f, 0.f, 0.f);
+    float3 frame_normal = make_float3(0.f, 0.f, 0.f);
 
     for (int s = 0; s < params.samples_per_pixel; ++s){        
         // Unique seed: XOR of pixel coords, frame seed, sample index
@@ -618,6 +568,11 @@ extern "C" __global__ void __raygen__pathTracer()
             if (prd.done)
                 break;
 
+            if (bounce == 0) {
+                frame_albedo = frame_albedo + prd.albedo;
+                frame_normal = frame_normal + prd.normal;
+            }
+
             // Update throughput with BRDF weight written by CH shader 
             // CH writes the new (attenuated) throughput back into prd.throughput.
             throughput = prd.throughput;
@@ -644,64 +599,44 @@ extern "C" __global__ void __raygen__pathTracer()
         frame_color = frame_color + radiance;
     }
 
+    float inv_spp = 1.0f / (float)params.samples_per_pixel;
+
     // Average over samples_per_pixel within this launch
-    frame_color = frame_color * (1.0f / (float)params.samples_per_pixel);
+    frame_color  = frame_color * inv_spp;
+    frame_albedo = frame_albedo * inv_spp;
+    if(length_squared(frame_normal) != 0.f)
+        frame_normal = normalize(frame_normal);
 
     // Progressive accumulation (running average across frames)
     // Formula: accum = accum + (new - accum) / (n + 1)
     // This is equivalent to a weighted average of all samples so far.
-    float3 accumulated;
+    float3 accumulated    = make_float3(0.f);
+    float3 current_albedo = make_float3(0.f);
+    float3 current_normal = make_float3(0.f);
+
     if (params.current_sample == 0){
         accumulated = frame_color;
+        current_albedo = frame_albedo;
+        current_normal = frame_normal;
     }
     else{
+        float frame_weight = 1.0f / (float)(params.current_sample + 1.f);
+        // color
         float3 prev = make_float3(params.accum_buffer[pixel_index].x, params.accum_buffer[pixel_index].y, params.accum_buffer[pixel_index].z);
-        float  w = 1.0f / (float)(params.current_sample + 1);
-        accumulated = make_float3(
-            prev.x + (frame_color.x - prev.x) * w,
-            prev.y + (frame_color.y - prev.y) * w,
-            prev.z + (frame_color.z - prev.z) * w
-        );
+        accumulated = lerp3(prev, frame_color, frame_weight);
+
+        // albedo
+        float3 old_albedo = make_float3(params.albedo_buffer[pixel_index].x, params.albedo_buffer[pixel_index].y, params.albedo_buffer[pixel_index].z);
+        current_albedo = lerp3(old_albedo, frame_albedo, frame_weight);
+
+        // normal
+        float3 old_normal = make_float3(params.normal_buffer[pixel_index].x, params.normal_buffer[pixel_index].y, params.normal_buffer[pixel_index].z);
+        current_normal = normalize(lerp3(old_normal, frame_normal, frame_weight));
     }
     
-    // Trace for denoiser guide buffers (albedo, normal) on the first sample only
-    if (params.current_sample == 0){
-        float u = (float)idx.x / (float)params.width;
-        float v = (float)idx.y / (float)params.height;
-
-        float3 ray_origin = params.camera.origin;
-        float3 ray_dir = normalize(
-            params.camera.lower_left_corner
-            + u * params.camera.horizontal
-            + v * params.camera.vertical
-            - params.camera.origin
-        );
-
-        // Path state
-
-
-        DenoiserGuidePRD prd = {};
-		prd.ray_type = 1;  // Set the ray type for denoiser guide
-        prd.albedo = make_float3(0.f, 0.f, 0.f);
-        prd.normal = make_float3(0.f, 0.f, 0.f);
-
-        traceDenoiserGuide(
-            params.traversable,
-            ray_origin,
-            ray_dir,
-            EPS,
-            1e16f,
-            prd
-        );
-
-		float3 albedo = prd.albedo;
-		float3 normal = prd.normal;
-
-        params.albedo_buffer[pixel_index] = make_float4(albedo.x, albedo.y, albedo.z, 1.0f);
-        params.normal_buffer[pixel_index] = make_float4(normal.x, normal.y, normal.z, 1.0f);
-    }
-
     params.accum_buffer[pixel_index] = make_float4(accumulated.x, accumulated.y, accumulated.z, 1.0f);
+    params.albedo_buffer[pixel_index] = make_float4(current_albedo.x, current_albedo.y, current_albedo.z, 1.0f);
+    params.normal_buffer[pixel_index] = make_float4(current_normal.x, current_normal.y, current_normal.z, 1.0f);
 
     // Tonemap and write to display buffer 
     //params.image[pixel_index] = convertToFinalSRGB(accumulated);
@@ -762,18 +697,6 @@ extern "C" __global__ void __closesthit__cookTorrance()
 {
     const HitGroupDataCookTorrance* sbt =
         (const HitGroupDataCookTorrance*)optixGetSbtDataPointer();
-
-    unsigned int ray_type = optixGetPayload_0();
-    if (ray_type == 1) {
-		DenoiserGuidePRD prd = loadClosesthitDenoiserGuidePRD();
-        const float3 ray_dir = normalize(optixGetWorldRayDirection());
-
-        const float2 uv = getInterpolatedUV(sbt);
-        prd.albedo = getBaseColor(sbt, uv);
-        prd.normal = getInterpolatedNormal(sbt, ray_dir);  // world space, flipped
-        storeClosesthitDenoiserGuidePRD(prd);
-        return;
-    }
 
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
@@ -941,6 +864,8 @@ extern "C" __global__ void __closesthit__cookTorrance()
     prd.radiance = make_float3(0.f);  // no NEE yet
     prd.is_specular = 0u;               // false — diffuse/glossy, MIS applies
     prd.done = 0u;
+    prd.albedo = base_color;
+    prd.normal = normal;
 
     storeClosesthitRadiancePRD(prd);
 }
@@ -992,18 +917,6 @@ extern "C" __global__ void __closesthit__glass()
     const HitGroupDataGlass* sbt =
         (const HitGroupDataGlass*)optixGetSbtDataPointer();
 
-    unsigned int ray_type = optixGetPayload_0();
-    if (ray_type == 1) {
-        DenoiserGuidePRD prd = loadClosesthitDenoiserGuidePRD();
-        const float3 ray_dir = normalize(optixGetWorldRayDirection());
-
-        const float2 uv = getInterpolatedUV(sbt);
-        prd.albedo = getTint(sbt, uv);
-        prd.normal = getInterpolatedNormal(sbt, ray_dir);  // world space, flipped
-        storeClosesthitDenoiserGuidePRD(prd);
-        return;
-    }
-
     RadiancePRD prd = loadClosesthitRadiancePRD();
 
     // Hit geometry 
@@ -1018,11 +931,9 @@ extern "C" __global__ void __closesthit__glass()
     const uint3  tri = sbt->indices[prim_idx];
     const float2 bary = optixGetTriangleBarycentrics();
     const float  b0 = 1.f - bary.x - bary.y;
-    float3 n_raw = normalize(
-        b0 * sbt->vertices[tri.x].normal +
-        bary.x * sbt->vertices[tri.y].normal +
-        bary.y * sbt->vertices[tri.z].normal
-    );
+    float3 n_raw = b0 *     sbt->vertices[tri.x].normal +
+                   bary.x * sbt->vertices[tri.y].normal +
+                   bary.y * sbt->vertices[tri.z].normal;
     n_raw = normalize(optixTransformNormalFromObjectToWorldSpace(n_raw));
 
     // Determine ray side (front face = hitting outside) 
@@ -1035,7 +946,7 @@ extern "C" __global__ void __closesthit__glass()
     float ior_ratio = front_face ? (1.0f / sbt->refraction_index) : sbt->refraction_index;
 
     // Emissive 
-    //prd.emitted = getEmissive(sbt, uv);
+    prd.emitted = getEmissive(sbt, uv);
 
     // Fresnel (Schlick)
     float cos_theta = fminf(dot(-ray_dir, outward_normal), 1.0f);
@@ -1079,12 +990,15 @@ extern "C" __global__ void __closesthit__glass()
     }
 
     // Fill payload 
-    prd.throughput = prd.throughput * getTint(sbt, uv);
+    float3 tint = getTint(sbt, uv);
+    prd.throughput = prd.throughput * tint;
     prd.next_origin = next_origin;
     prd.next_direction = normalize(scattered);
     prd.radiance = make_float3(0.f);
     prd.is_specular = 1u;  // skip NEE MIS for this delta event
     prd.done = 0u;
+    prd.albedo = tint;
+    prd.normal = outward_normal;
 
     storeClosesthitRadiancePRD(prd);
 }
