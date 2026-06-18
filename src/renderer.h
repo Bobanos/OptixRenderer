@@ -51,6 +51,7 @@ public:
     void initOptix();
     void loadScene(SceneID scene_id);
     void loadMap(const std::string& path);
+    void buildLightList();
     void setupShaders();
     void setupLighting();
 

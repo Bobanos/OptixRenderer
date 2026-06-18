@@ -38,7 +38,6 @@ OptixRenderer::~OptixRenderer() {
 // Initializes cuda
 void OptixRenderer::initCUDA() {
     CUDA_CHECK(cudaFree(nullptr));
-    //CUDA_CHECK(cudaStreamCreate(&stream));
     DEBUG_LOG("[CUDA] Initialized");
 }
 
@@ -67,6 +66,7 @@ void OptixRenderer::loadScene(SceneID scene_id) {
     loaded_scene_objects.clear();  // Clear previously loaded scene objects to free memory and prepare for new scene
     scene_instances.clear();  // Clear previously created scene instances to prepare for new scene
 
+    params.background_color = current_scene_data.background_color;
     current_sbt_offset = 0;
 
     loaded_scene_objects.reserve(current_scene_data.objects.size());
@@ -108,6 +108,52 @@ void OptixRenderer::loadScene(SceneID scene_id) {
 
     buildIAS();  // Build the top-level IAS for all instances in the scene using the GAS handles stored in loaded_scene_objects
     loadMap(current_scene_data.envmap_path);  // Load the environment map specified in the scene configuration and upload it to the GPU
+    buildLightList();  // Build the flat NEE light list (emissive triangles) and upload it to the GPU
+}
+
+// Builds the NEE light list from all currently loaded scene objects, computes
+// its area*luminance-weighted CDF, and uploads both the triangle array and
+// the total weight to GPU memory. Stores the resulting pointer + counts
+// directly into params so the next render() call picks them up automatically.
+void OptixRenderer::buildLightList() {
+    // Free any previously uploaded light list before rebuilding
+    if (params.emissive_triangles) {
+        CUDA_CHECK(cudaFree((void*)params.emissive_triangles));
+        params.emissive_triangles = nullptr;
+    }
+
+    // Collect one transform pointer per object, in the same order as
+    // loaded_scene_objects. scene_instances[i].object points back into
+    // loaded_scene_objects, and instance.transform holds the current
+    // world transform for that object.
+    std::vector<float(*)[12]> object_transforms;
+    object_transforms.reserve(scene_instances.size());
+    for (auto& instance : scene_instances)
+        object_transforms.push_back(&instance.transform);
+
+    std::vector<EmissiveTriangle> lights =
+        buildEmissiveTriangleList(loaded_scene_objects, object_transforms);
+
+    float total_weight = buildLightCDF(lights);
+
+    params.num_emissive_triangles = (int)lights.size();
+    params.total_emissive_weight = total_weight;
+
+    if (lights.empty()) {
+        params.emissive_triangles = nullptr;
+        DEBUG_LOG("[NEE] No emissive triangles found, NEE will be skipped at render time");
+        return;
+    }
+
+    CUDA_CHECK(cudaMalloc((void**)&params.emissive_triangles,
+        lights.size() * sizeof(EmissiveTriangle)));
+    CUDA_CHECK(cudaMemcpy((void*)params.emissive_triangles,
+        lights.data(),
+        lights.size() * sizeof(EmissiveTriangle),
+        cudaMemcpyHostToDevice));
+
+    DEBUG_LOGF("[NEE] Uploaded %d emissive triangles, total weight = %f",
+        params.num_emissive_triangles, params.total_emissive_weight);
 }
 
 // Loads a texture from disk if not already loaded, and returns a CUDA texture object handle.
@@ -116,7 +162,7 @@ cudaTextureObject_t OptixRenderer::loadTextureCached(const std::string& resolved
     // Already loaded - return existing handle
     auto it = texture_cache.find(resolved_path);
     if (it != texture_cache.end()) {
-        printf("[Texture] Cache hit: %s\n", resolved_path.c_str());
+        //printf("[Texture] Cache hit: %s\n", resolved_path.c_str());
         return it->second.tex;
     }
 
@@ -150,7 +196,7 @@ cudaTextureObject_t OptixRenderer::loadTextureCached(const std::string& resolved
     CUDA_CHECK(cudaCreateTextureObject(&td.tex, &res, &tex, nullptr));
 
     texture_cache[resolved_path] = td;
-    printf("[Texture] Loaded: %s (%dx%d)\n", resolved_path.c_str(), w, h);
+    //printf("[Texture] Loaded: %s (%dx%d)\n", resolved_path.c_str(), w, h);
     return td.tex;
 }
 
@@ -274,7 +320,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.numAttributeValues = 2;
-    pipeline_compile_options.numPayloadValues = 24;
+    pipeline_compile_options.numPayloadValues = 25;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
     pipeline_compile_options.pipelineLaunchParamsSizeInBytes = sizeof(Params);
@@ -926,8 +972,6 @@ void OptixRenderer::setupLighting() {
 
     params.envmap.scale = 1.0f;
     params.envmap.exposure = 0.0f;
-
-    //DEBUG_LOGF("[Lighting] Setup complete %d lights", params.num_lights);
 }
 
 // Render the scene using the provided camera and number of samples per pixel. 
@@ -1043,7 +1087,7 @@ void OptixRenderer::FreeDeviceBuffers() {
         CUDA_CHECK(cudaFree((void*)object.d_sbt_indices));       object.d_sbt_indices = 0;
         CUDA_CHECK(cudaFree((void*)object.d_gas_output));        object.d_gas_output = 0;
         // Free OMM buffers if this object had OMM built for it.
-        // These must outlive the GAS — free them only here during full cleanup.
+        // These must outlive the GAS - free them only here during full cleanup.
         if (object.d_omm_array_output) {
             CUDA_CHECK(cudaFree((void*)object.d_omm_array_output));
             object.d_omm_array_output = 0;
@@ -1069,6 +1113,13 @@ void OptixRenderer::FreeDeviceBuffers() {
     freeAndNull(device_buffers.d_hg);
     freeAndNull(device_buffers.d_rg);
     freeAndNull(device_buffers.d_ms);
+
+    if (params.emissive_triangles) {
+        CUDA_CHECK(cudaFree((void*)params.emissive_triangles));
+        params.emissive_triangles = nullptr;
+    }
+    params.num_emissive_triangles = 0;
+    params.total_emissive_weight = 0.f;
 }
 
 // Helper function to create a 3x4 transform matrix
@@ -1146,6 +1197,7 @@ void OptixRenderer::switchScene(SceneID scene_id) {
         current_scene_data.name.c_str(),
         current_scene_data.objects.size());
 }
+
 
 // Denoiser setup function to initialize OptiX denoiser with specified options and allocate necessary GPU buffers for denoising operations. 
 // This function creates an OptiX denoiser, computes memory requirements, allocates GPU memory for the denoiser state and scratch buffers, and sets up the denoiser state for use in rendering.

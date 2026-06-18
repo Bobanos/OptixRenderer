@@ -15,7 +15,6 @@
 #include "float3_math.h"
 #include "tiny_obj_loader.h"
 
-// Your own material — only the fields you use
 struct ObjMaterial {
     std::string name;
     float3      albedo = { 0.8f, 0.8f, 0.8f };
@@ -90,7 +89,7 @@ inline std::string resolveTexturePath(
     std::error_code ec;
     auto canonical_exact = std::filesystem::weakly_canonical(exact_attempt, ec);
     if (!ec && std::filesystem::exists(canonical_exact)) {
-        printf("[Texture] Found at exact path: %s\n", canonical_exact.string().c_str());
+        //printf("[Texture] Found at exact path: %s\n", canonical_exact.string().c_str());
         return canonical_exact.string();
     }
 
@@ -98,7 +97,7 @@ inline std::string resolveTexturePath(
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(search_root)) {
             if (entry.is_regular_file() && entry.path().filename().string() == filename) {
-                printf("[Texture] Found '%s' at: %s\n", filename.c_str(), entry.path().string().c_str());
+                //printf("[Texture] Found '%s' at: %s\n", filename.c_str(), entry.path().string().c_str());
                 return entry.path().string();
             }
         }
@@ -189,7 +188,7 @@ inline void loadTextureFromFile(const std::string& path)
     unsigned char* data = stbi_load(path.c_str(), &w, &h, &ch, 4);
     if (!data) {
         std::cerr << "[TEX] Failed to load: " << path
-            << " — " << stbi_failure_reason() << "\n";
+            << " - " << stbi_failure_reason() << "\n";
         return;
     }
     //std::cout << "[TEX] Loaded " << path << " (" << w << "x" << h << ")\n";
@@ -261,7 +260,7 @@ inline LoadedSceneObject loadSceneObject(const std::string& name,
     for (const auto& mat : materials)
 		scene_object.materials.push_back(ObjMaterial::from(mat, base_dir));  // Convert tinyobj material to our own format and store in scene_object.materials
 
-    // Walk every shape, every face — route directly into flat buffers
+    // Walk every shape, every face - route directly into flat buffers
     for (const auto& shape : shapes) {
         for (size_t face_index = 0; face_index < shape.mesh.num_face_vertices.size(); face_index++) {
             int mat_id = shape.mesh.material_ids[face_index];
@@ -304,9 +303,115 @@ inline LoadedSceneObject loadSceneObject(const std::string& name,
 }
 
 // ===================================================================
-// ENVMAP CDF COMPUTATION for importance sampling
-// Compute 2D CDF weighted by luminance * sin(theta)
+// NEE LIGHT LIST CONSTRUCTION
+// Builds the flat EmissiveTriangle array used by Next Event Estimation.
 // ===================================================================
+
+// Applies the object's 3x4 row-major transform (3 rows of 4 floats:
+// rotation/scale 3x3 followed by a translation column) to a local-space
+// point, producing a world-space point. This is the same layout written
+// by OptixRenderer::createTransformMatrix.
+inline float3 transformPoint(const float(&t)[12], float3 p)
+{
+    return make_float3(
+        t[0] * p.x + t[1] * p.y + t[2] * p.z + t[3],
+        t[4] * p.x + t[5] * p.y + t[6] * p.z + t[7],
+        t[8] * p.x + t[9] * p.y + t[10] * p.z + t[11]
+    );
+}
+
+// Walks every loaded object's triangles, and for every triangle whose
+// material is emissive, transforms its vertices to world space (using the
+// object's current transform) and appends one EmissiveTriangle to the list.
+inline std::vector<EmissiveTriangle> buildEmissiveTriangleList(
+    const std::vector<LoadedSceneObject>& objects,
+    const std::vector<float(*)[12]>& object_transforms) // one transform pointer per object, same order as `objects`
+{
+    std::vector<EmissiveTriangle> lights;
+
+    for (size_t obj_idx = 0; obj_idx < objects.size(); ++obj_idx)
+    {
+        const LoadedSceneObject& obj = objects[obj_idx];
+        const float(&transform)[12] = *object_transforms[obj_idx];
+
+        for (size_t t = 0; t < obj.indices.size(); ++t)
+        {
+            uint32_t mat_idx = obj.sbt_index_buffer[t];
+            const ObjMaterial& mat = obj.materials[mat_idx];
+
+            // Simple version: only constant Ke. Textured emissive (map_Ke)
+            // is intentionally skipped here - extend later by subdividing
+            // and sampling the texture per sub-triangle.
+            if (!mat.is_emissive) continue;
+            if (luminance(mat.emission) < 1e-4f) continue;
+
+            const uint3& tri = obj.indices[t];
+            float3 local_v0 = obj.vertices[tri.x].position;
+            float3 local_v1 = obj.vertices[tri.y].position;
+            float3 local_v2 = obj.vertices[tri.z].position;
+
+            float3 v0 = transformPoint(transform, local_v0);
+            float3 v1 = transformPoint(transform, local_v1);
+            float3 v2 = transformPoint(transform, local_v2);
+
+            float3 e1 = v1 - v0;
+            float3 e2 = v2 - v0;
+            float3 cr = cross(e1, e2);
+            float  area = 0.5f * length(cr);
+
+            if (area < 1e-10f) continue; // degenerate triangle, skip
+
+            EmissiveTriangle light{};
+            light.v0 = v0;
+            light.v1 = v1;
+            light.v2 = v2;
+            light.emission = mat.emission;
+            light.area = area;
+            light.cdf = 0.f; // filled in by buildLightCDF
+
+            lights.push_back(light);
+        }
+    }
+
+    printf("[NEE] Built light list: %zu emissive triangles\n", lights.size());
+    return lights;
+}
+
+// Computes the area*luminance-weighted CDF over the light list, in place,
+// and returns the total weight (sum of area*luminance across all lights).
+// This total is needed in the NEE estimator to convert the per-triangle
+// selection probability (weight / total) combined with a uniform point
+// pick (1 / area) into a proper PDF - see Params::total_emissive_weight.
+//
+// Mirrors the same cumulative-sum-then-normalize structure as
+// computeEnvmapCDF above, just over a 1D list of triangles instead of a
+// 2D grid of pixels.
+inline float buildLightCDF(std::vector<EmissiveTriangle>& lights)
+{
+    if (lights.empty()) return 0.f;
+
+    float total = 0.f;
+    for (const auto& l : lights)
+        total += l.area * luminance(l.emission);
+
+    if (total < 1e-10f) {
+        // All lights ended up with negligible weight, avoids divide by zero.
+        for (auto& l : lights) l.cdf = 1.f;
+        return 0.f;
+    }
+
+    float running = 0.f;
+    for (auto& l : lights) {
+        running += l.area * luminance(l.emission);
+        l.cdf = running / total;
+    }
+    lights.back().cdf = 1.0f; // guarantee exact 1.0 at the end (float safety)
+
+    return total;
+}
+
+
+// Compute 2D CDF weighted by luminance * sin(theta)
 inline void computeEnvmapCDF(const float* hdr_data, int width, int height,
     std::vector<float>& out_marginal_cdf,
     std::vector<float>& out_conditional_cdf)

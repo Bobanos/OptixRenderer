@@ -429,9 +429,9 @@ int main() {
                 std::stringstream clipboard_text;
                 clipboard_text << "scene.camera_position = make_float3("
                     << std::fixed << std::setprecision(2)
-                    << pos.x << "f, " << pos.y << "f, " << pos.z << "f)\n";
+                    << pos.x << "f, " << pos.y << "f, " << pos.z << "f);\n";
                 clipboard_text << "scene.camera_front = make_float3(" << std::fixed << std::setprecision(2)
-                    << look.x << "f, " << look.y << "f, " << look.z << "f)\n";
+                    << look.x << "f, " << look.y << "f, " << look.z << "f);\n";
 
                 // Copy to clipboard using ImGui
                 ImGui::SetClipboardText(clipboard_text.str().c_str());
@@ -459,7 +459,7 @@ int main() {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                 ImGui::SetTooltip("Saves current camera position and lookAt to logs/ folder");
             }
-
+            ImGui::Separator();
 
             ImGui::SetNextItemWidth(100.0f);
             if (ImGui::InputInt("Samples Per Pixel", &spp_input, 1, 10)) {
@@ -502,7 +502,7 @@ int main() {
             }
 
             ImGui::SetNextItemWidth(100.0f);
-            if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 100.0f, 1.0f)) {
+            if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 1.0f, 100.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
                 renderer->updateLightIntensity(light_intensity);
                 light_changed = true;
             }

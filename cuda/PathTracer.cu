@@ -38,7 +38,7 @@ __device__ float rnd(unsigned int& seed) {
 //   p1..p3  : throughput     (float3,   RW)
 //   p4      : done           (uint32,   W by CH/MS, R by caller)
 //   p5..p7  : emitted        (float3,   W by CH/MS)
-//   p8..p10 : radiance       (float3,   W by CH/MS — reserved for NEE)
+//   p8..p10 : radiance       (float3,   W by CH/MS - reserved for NEE)
 //   p11..p13: next_origin    (float3,   W by CH)
 //   p14..p16: next_direction (float3,   W by CH)
 //   p17     : is_specular    (uint32,   W by CH)
@@ -103,7 +103,7 @@ static __forceinline__ __device__ RadiancePRD loadMissRadiancePRD()
 
 
 // ------------------------------------------------------------------
-// traceRadiance — fires a ray and returns filled RadiancePRD
+// traceRadiance - fires a ray and returns filled RadiancePRD
 // ------------------------------------------------------------------
 static __forceinline__ __device__ void traceRadiance(
     OptixTraversableHandle handle,
@@ -181,7 +181,7 @@ static __forceinline__ __device__ void traceRadiance(
 }
 
 // ------------------------------------------------------------------
-// Geometry helpers — shared by both hit programs
+// Geometry helpers - shared by both hit programs
 // ------------------------------------------------------------------
 
 static __forceinline__ __device__ float3 getGeometricNormal(const HitGroupDataCommon* sbt) {
@@ -244,7 +244,7 @@ static __forceinline__ __device__ float2 getInterpolatedUV(
     );
 }
 
-// Sample emissive — texture takes priority over constant.
+// Sample emissive - texture takes priority over constant.
 static __forceinline__ __device__ float3 getEmissive(
     const HitGroupDataCommon* sbt, float2 uv){
     if (sbt->emission_texture != 0) {
@@ -328,16 +328,6 @@ static __forceinline__ __device__ float3 getSpecularColor(
 // Math utilities
 // ------------------------------------------------------------------
 
-static __forceinline__ __device__ float luminance(float3 c)
-{
-    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-}
-
-static __forceinline__ __device__ float3 lerp3(float3 a, float3 b, float t)
-{
-    return a + t * (b - a);
-}
-
 // Build orthonormal tangent frame around a shading normal.
 static __forceinline__ __device__ void buildONB(
     const float3& n,
@@ -418,12 +408,12 @@ static __forceinline__ __device__ float G2_SmithCombined(
 }
 
 // ------------------------------------------------------------------
-// VNDF Sampling (Dupuy & Benyoub 2023 — Spherical Cap method)
+// VNDF Sampling (Dupuy & Benyoub 2023 - Spherical Cap method)
 //
 // Samples the GGX distribution of visible normals.
 // All vectors in tangent space (Z = up = shading normal).
 //
-// wi:       incident (view) direction in tangent space — must have wi.z > 0
+// wi:       incident (view) direction in tangent space - must have wi.z > 0
 // alpha:    isotropic GGX roughness (perceptual roughness^2)
 // u1, u2:   uniform random numbers in [0, 1)
 // returns:  half vector wm in tangent space (normalized)
@@ -646,7 +636,7 @@ extern "C" __global__ void __raygen__pathTracer()
 
 
 // ==================================================================================
-// MISS — environment map or constant sky
+// MISS - environment map or constant sky
 // ==================================================================================
 extern "C" __global__ void __miss__envMap()
 {
@@ -658,7 +648,7 @@ extern "C" __global__ void __miss__envMap()
     RadiancePRD prd = loadMissRadiancePRD();
 
     float3 ray_dir = normalize(optixGetWorldRayDirection());
-    float3 Le = make_float3(1.f);
+    float3 Le = params.background_color;
 
     if (params.envmap.has_envmap) {
         Le = sampleEnvmap(params.envmap.texture, ray_dir) * params.envmap.scale * powf(2.f, params.envmap.exposure);
@@ -674,7 +664,7 @@ extern "C" __global__ void __miss__envMap()
 
 
 // ==================================================================================
-// CLOSESTHIT — Cook-Torrance microfacet BRDF
+// CLOSESTHIT - Cook-Torrance microfacet BRDF
 //
 // Implements:
 //   - GGX NDF + height-correlated Smith G2 + Schlick Fresnel
@@ -721,7 +711,7 @@ extern "C" __global__ void __closesthit__cookTorrance()
     roughness = clamp(roughness, 0.02f, 1.0f);
 
     // GGX alpha: perceptual roughness -> linear roughness -> alpha
-    // alpha = roughness^2 (Disney remapping — perceptually linear slider)
+    // alpha = roughness^2 (Disney remapping - perceptually linear slider)
     float alpha = roughness * roughness;
     float alpha2 = alpha * alpha;
 
@@ -862,7 +852,7 @@ extern "C" __global__ void __closesthit__cookTorrance()
     prd.next_origin = hit_pos + EPS * normal;
     prd.next_direction = normalize(scatter_dir_world);
     prd.radiance = make_float3(0.f);  // no NEE yet
-    prd.is_specular = 0u;               // false — diffuse/glossy, MIS applies
+    prd.is_specular = 0u;               // false - diffuse/glossy, MIS applies
     prd.done = 0u;
     prd.albedo = base_color;
     prd.normal = normal;
@@ -900,7 +890,7 @@ extern "C" __global__ void __anyhit__opacity()
 }
 
 // ==================================================================================
-// CLOSESTHIT — Perfect dielectric glass
+// CLOSESTHIT - Perfect dielectric glass
 //
 // Implements:
 //   - Schlick Fresnel to stochastically choose reflect vs. refract
@@ -908,9 +898,9 @@ extern "C" __global__ void __anyhit__opacity()
 //   - Total Internal Reflection (TIR) handled automatically via discriminant check
 //   - Front/back face detection for correct IOR ratio (air->glass vs glass->air)
 //   - Tint support (colored glass)
-//   - Emissive support (glowing glass — unusual but valid)
+//   - Emissive support (glowing glass - unusual but valid)
 //
-// is_specular is set to 1 — raygen will skip NEE MIS for this bounce.
+// is_specular is set to 1 - raygen will skip NEE MIS for this bounce.
 // ==================================================================================
 extern "C" __global__ void __closesthit__glass()
 {

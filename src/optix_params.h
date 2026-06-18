@@ -19,6 +19,13 @@ struct ColoredVertex {
 };
 
 
+struct EmissiveTriangle {
+    float3 v0, v1, v2;   // world-space vertices
+    float3 emission;     // constant emissive radiance (Ke), in world/linear units
+    float  area;         // triangle area in world units, precomputed at build time
+    float  cdf;          // cumulative (area * luminance) fraction, normalized to [0,1]
+};
+
 // Environment map parameters
 struct EnvironmentMap {
     cudaTextureObject_t texture; // HDR environment map
@@ -29,6 +36,9 @@ struct EnvironmentMap {
     float               scale;   // intensity multiplier (can be > 1)
     float               exposure; // additional exposure in stops
     bool                has_envmap;
+    float               total_weight; // sum of luminance*sin(theta) over all texels,
+    // computed on host alongside the CDF. Used to balance NEE strategy selection (envmap vs
+    // light triangles) proportional to how much each source actually contributes.
 };
 
 struct Params {
@@ -50,18 +60,21 @@ struct Params {
     unsigned int random_seed;
 
     EnvironmentMap envmap;
+    float3 background_color;
+
+
+    EmissiveTriangle* emissive_triangles;
+    int                num_emissive_triangles;
+    float              total_emissive_weight;  // sum of area*luminance across all lights,
 };
 
 //===================================================================================================
 
-constexpr unsigned int RAY_TYPE_COUNT = 1;
-
-
 // ------------------------------------------------------------------
 // RadiancePRD payload layout
 //
-// Register map (18 registers total):
-//   p0      : ray_type         (uint32, R by CH/MS)
+// Register map (24 registers total):
+//   p0      : ray_type         (uint32, R by CH/MS) - 0 = radiance, 1 = shadow/occlusion
 //   p1..p3  : throughput       (float3, RW)
 //   p4       : done            (uint,   W by CH and MS, R by caller)
 //   p5..p7   : emitted         (float3, W by CH and MS, R by caller)
@@ -71,6 +84,9 @@ constexpr unsigned int RAY_TYPE_COUNT = 1;
 //   p17      : is_specular     (uint,   W by CH, R by caller - for MIS later)
 //   p18..p20 : albedo          (float3, W by CH, R by caller - for denoiser guide)
 //   p21..p23 : normal          (float3, W by CH, R by caller - for denoiser guide)
+//   p24      : brdf_pdf        (float,  W by CH, R by caller - solid-angle PDF of the
+//                                        sampled scatter direction, used for MIS when
+//                                        the NEXT bounce implicitly hits a light)
 // ------------------------------------------------------------------
 
 // ------------------------------------------------------------------
@@ -85,19 +101,14 @@ struct RadiancePRD
     // CH / MS write, caller reads after trace
     unsigned int done;          // 1 = path terminates (miss or absorbed)
     float3       emitted;       // Le at this surface (for emissive geometry)
-    float3       radiance;      // direct light contribution (unused until NEE)
+    float3       radiance;      // direct light contribution (NEE result, added by CH)
     float3       next_origin;   // scattered ray origin
     float3       next_direction;// scattered ray direction
     unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
-	float3       albedo;        // Base color for diffuse materials, used for denoiser guide
-	float3       normal;        // Surface normal at hit point, used for denoiser guide
+    float3       albedo;        // Base color for diffuse materials, used for denoiser guide
+    float3       normal;        // Surface normal at hit point, used for denoiser guide
+    float        brdf_pdf;      // solid-angle PDF of the sampled scatter direction (for MIS)
 };
-
-//struct ShadowPRD
-//{
-//	unsigned int ray_type;
-//    unsigned int occluded;      // 1 = path is occluded, 0 = unoccluded
-//};
 
 //===================================================================================================
 
@@ -117,28 +128,28 @@ struct HitGroupDataCookTorrance : public HitGroupDataCommon
 {
     // Base color / albedo
     float3              base_color;         // constant base color (Kd for dielectric, Ks for metal)
-    cudaTextureObject_t albedo_texture;     // map_Kd — 0 if not present
+    cudaTextureObject_t albedo_texture;     // map_Kd - 0 if not present
 
     // Specular (used to compute F0 per-texel when map_Ks is present)
     float3              specular_color;     // constant Ks
-    cudaTextureObject_t specular_texture;   // map_Ks — 0 if not present
+    cudaTextureObject_t specular_texture;   // map_Ks - 0 if not present
 
-    // Roughness — scalar fallback + optional texture (R channel)
+    // Roughness - scalar fallback + optional texture (R channel)
     float               roughness;          // scalar roughness in [0,1]
-    cudaTextureObject_t roughness_texture;  // map_Pr — 0 if not present
+    cudaTextureObject_t roughness_texture;  // map_Pr - 0 if not present
 
-    // Metallic — scalar fallback + optional texture (R channel)
+    // Metallic - scalar fallback + optional texture (R channel)
     float               metallic;           // scalar metallic in [0,1]
-    cudaTextureObject_t metallic_texture;   // map_Pm — 0 if not present
+    cudaTextureObject_t metallic_texture;   // map_Pm - 0 if not present
 
-    cudaTextureObject_t alpha_texture;   // map_d — 0 if not present
+    cudaTextureObject_t alpha_texture;   // map_d - 0 if not present
 };
 
 struct HitGroupDataGlass : public HitGroupDataCommon
 {
     float refraction_index; // IOR (e.g. 1.5 for standard glass)
-    float3 tint;            // color tint — (1,1,1) for clear glass
-    cudaTextureObject_t tint_texture; // map_Kd — 0 if not present
+    float3 tint;            // color tint - (1,1,1) for clear glass
+    cudaTextureObject_t tint_texture; // map_Kd - 0 if not present
 };
 
 // Compile-time verification template for derived hit group types

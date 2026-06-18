@@ -33,10 +33,11 @@ struct SceneData {
     SceneID id;
     std::string name;
 	std::string envmap_path = "";
+    float3 background_color = make_float3(1.0f, 1.0f, 1.0f); // Default background thats displayed if no env map
 
     // Camera settings
 	float3 camera_position = make_float3(0.0f, 1.0f, 4.0f);
-	float3 camera_front = make_float3(0.0f, 0.0f, 0.0f);
+	float3 camera_front = make_float3(0.0f, 0.0f, 1.0f);
 	float3 camera_up = make_float3(0.0f, 1.0f, 0.0f);
 	float camera_vfov = 60.0f;
 
@@ -75,10 +76,8 @@ private:
         scene.name = "Allied Avenger";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
-        scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
-        scene.camera_front = make_float3(-0.86f, 0.33f, -0.38f);
-        scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
-        scene.camera_vfov = 60.0f;
+        scene.camera_position = make_float3(-0.77f, 3.03f, 8.62f);
+        scene.camera_front = make_float3(0.13f, -0.04f, -0.99f);
 
         SceneObject obj;
         obj.name = "Allied Avenger";
@@ -124,11 +123,10 @@ private:
         scene.id = SceneID::GEOSPHERE;
         scene.name = "Geosphere (Furnace Test)";
         scene.envmap_path = "";
+        scene.background_color = make_float3(1.0f, 1.0f, 1.0f);
 
-        scene.camera_position = make_float3(0.0f, 0.7f, 2.5f);
-        scene.camera_front = make_float3(0.0f, -1.0f, 0.0f);
-        scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
-        scene.camera_vfov = 60.0f;
+        scene.camera_position = make_float3(0.00f, 0.70f, 2.50f);
+        scene.camera_front = make_float3(-0.03f, -0.28f, -0.96f);
 
         SceneObject obj;
         obj.name = "Geosphere";
@@ -153,10 +151,8 @@ private:
         scene.name = "Spitfire";
         scene.envmap_path = "assets/moonless_golf_2k.hdr";
 
-        scene.camera_position = make_float3(-0.7f, 3.0f, 8.0f);
-        scene.camera_front = make_float3(0.0f, 0.0f, 0.0f);
-        scene.camera_up = make_float3(0.0f, 1.0f, 0.0f);
-        scene.camera_vfov = 60.0f;
+        scene.camera_position = make_float3(-0.70f, 3.00f, 8.00f);
+        scene.camera_front = make_float3(0.59f, -0.27f, -0.76f);
 
         SceneObject obj;
         obj.name = "Spitfire";
@@ -206,8 +202,8 @@ private:
         scene.name = "Spitfire Company";
         scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
 
-        scene.camera_position = make_float3(3.0f, 3.0f, 7.5f);
-		scene.camera_front = make_float3(0.0f, -2.6f, 0.0f);
+        scene.camera_position = make_float3(4.39f, 2.81f, 7.44f);
+        scene.camera_front = make_float3(-0.29f, -0.20f, -0.94f);
 
         SceneObject obj;
 		obj.name = "Spitfire Company";
@@ -223,8 +219,11 @@ private:
         SceneData scene;
         scene.id = SceneID::CORNELL_BOX;
         scene.name = "Cornell Box";
-        scene.envmap_path = "assets/golden_gate_hills_2k.hdr";
-        scene.camera_position = make_float3(1.0f, 1.3f, 1.4f);
+        scene.background_color = make_float3(0.0f, 0.0f, 0.0f);
+
+        scene.camera_position = make_float3(0.96f, 1.27f, 1.45f);
+        scene.camera_front = make_float3(0.02f, -0.02f, -1.00f);
+
 
         SceneObject obj;
         obj.name = "Cornell Box";
