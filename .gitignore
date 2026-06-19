@@ -66,3 +66,7 @@ Thumbs.db
 # Lumberyard assets (too large)
 # ==================================================
 assets/lumberyard
+/cuda/PathTracer_badNEE.cu
+/cuda/SimplePathTracer.cu
+/cuda/SimplePathTracer_experi.cu
+/src/scene.h

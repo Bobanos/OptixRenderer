@@ -419,11 +419,29 @@ static __device__ __forceinline__ BSDFSample evaluateCookTorrance( float3 Ve, fl
     return result;
 }
 
-static __device__ __forceinline__ BSDFSample evaluateLambert( float3 Ve, float alpha_x, float alpha_y,
-    float U1, float U2, float3 F0){
+// Evaluates a Lambertian diffuse bounce
+inline __device__ BSDFSample evaluateLambertian(float U1, float U2, float3 base_color, float metallic) {
     BSDFSample result;
-    result.valid = false;
 
+    // 1. Cosine-weighted hemisphere sampling
+    float r = sqrtf(U1);
+    float theta = 2.0f * M_PI * U2;
+
+    // Tangent space direction
+    result.Li = make_float3(r * cosf(theta), r * sinf(theta), sqrtf(fmaxf(0.0f, 1.0f - U1)));
+
+    // 2. Compute PDF ( cosine / PI )
+    result.pdf = result.Li.z / M_PI;
+
+    // 3. Compute Weight
+    // The BRDF is base_color / PI. The Monte Carlo estimator is: (BRDF * cos) / PDF.
+    // ((base_color / PI) * Li.z) / (Li.z / PI) = base_color
+
+    // Metals do not have diffuse reflection (photons are absorbed instantly).
+    // We scale the diffuse albedo down based on the metallic value.
+    result.weight = base_color * (1.0f - metallic);
+
+    result.valid = (result.Li.z > 0.0f);
     return result;
 }
 
@@ -649,19 +667,18 @@ extern "C" __global__ void __miss__occlusion()
 // ==================================================================================
 extern "C" __global__ void __closesthit__cookTorrance()
 {
-    //Get Payload and Hit Info
+    // 1. Get Payload and Hit Info
     const HitGroupDataCookTorrance* sbt = (const HitGroupDataCookTorrance*)optixGetSbtDataPointer();
-
     RadiancePRD* prd = get_prd<RadiancePRD>();
 
     // Get world-space ray and intersection data
-    const float3 ray_dir  = normalize(optixGetWorldRayDirection());
+    const float3 ray_dir = normalize(optixGetWorldRayDirection());
     const float3 ray_orig = optixGetWorldRayOrigin();
-    const float  hit_t    = optixGetRayTmax();
-    const float3 hit_pos  = ray_orig + hit_t * ray_dir;
+    const float  hit_t = optixGetRayTmax();
+    const float3 hit_pos = ray_orig + hit_t * ray_dir;
 
     const float2 uv = getInterpolatedUV(sbt);
-    float3 normal_s = getInterpolatedNormal(sbt);  // world space, flipped
+    float3 normal_s = getInterpolatedNormal(sbt);  // world space
     float3 normal_g = getGeometricNormal(sbt);
 
     // Ensure the geometry normal is facing the incoming ray
@@ -673,8 +690,6 @@ extern "C" __global__ void __closesthit__cookTorrance()
     // Validate the incoming View ray against the true Geometry
     float3 V_world = -ray_dir;
     if (dot(V_world, normal_g) <= 0.0f) {
-        // The camera is looking at this shading point from INSIDE the geometry.
-        // This sample is invalid.
         prd->done = true;
         return;
     }
@@ -683,157 +698,85 @@ extern "C" __global__ void __closesthit__cookTorrance()
     float3 tangent, bitangent;
     buildONB(normal_s, tangent, bitangent);
 
-    // Project world_Ve onto our Tangent, Bitangent, and Normal
-    // This puts the normal exactly at Z = (0,0,1) for the Heitz math
+    // Project world_V onto Tangent Space
     float3 Ve = worldToTangent(V_world, normal_s, tangent, bitangent);
 
-    // Sample material parameters 
-    float  roughness  = getRoughness(sbt, uv);
-    //roughness = 0.1f;
+    // 2. Fetch Material Parameters 
+    float  roughness = getRoughness(sbt, uv);
     float3 base_color = getBaseColor(sbt, uv);
-    float  alpha_x    = clamp(roughness * roughness, 0.001f, 1.f); // alpha = roughness^2 (Disney remapping - perceptually linear slider)
-    float  alpha_y    = alpha_x;
-    float  metallic   = getMetallic(sbt, uv);
+    float  metallic = getMetallic(sbt, uv);
+    float  alpha_x = clamp(roughness * roughness, 0.001f, 1.f);
+    float  alpha_y = alpha_x;
 
-    //// Compute F0 (reflectance at normal incidence) 
-    //// For dielectrics: F0 = 0.04 (covers most non-metals)
-    //// For metals:      F0 = base_color (colored metallic reflectance)
-    //// Per-texel specular override: if map_Ks is present, its luminance can
-    //// scale F0 from 0 to 0.08 (Allegorithmic PBR guide specular level trick).
-    //float3 dielectric_F0 = make_float3(0.04f, 0.04f, 0.04f);
-
-    //// If specular texture exists, use it to override per-texel F0 for dielectrics
-    //// (the specular workflow: luminance(Ks) remapped to [0, 0.08])
-    //if (sbt->specular_texture != 0) {
-    //    float3 ks = getSpecularColor(sbt, uv);
-    //    // Remap: luminance(Ks) in [0,1] -> F0 in [0, 0.08]
-    //    dielectric_F0 = make_float3(luminance(ks) * 0.08f);
-    //}
-
-    //// Final F0: lerp between dielectric value and base_color by metallic
-    //float3 F0 = lerp3(dielectric_F0, base_color, metallic);
-
-    float3 F0 = make_float3(0.9f, 0.7f, 0.3f); //should be gold for now
-
-    // Emissive 
+    // Emissive (perfect for loading emissive textures later)
     prd->emitted = getEmissive(sbt, uv);
 
+    // 3. F0 Calculation (Metallic Workflow)
+    // Dielectrics have ~4% reflectivity (0.04). Metals use their base color as F0.
+    float3 F0_dielectric = make_float3(0.04f);
+    float3 F0 = F0_dielectric * (1.0f - metallic) + base_color * metallic;
 
+    // 4. Lobe Selection Probability
+    // Estimate how reflective the surface is at this viewing angle using Schlick
+    float VdotN = fmaxf(0.0f, Ve.z); // In tangent space, N is simply (0,0,1)
+    float3 F_guess = F0 + (make_float3(1.0f) - F0) * powf(1.0f - VdotN, 5.0f);
+
+    // Average the RGB reflectivity to get a probability [0.0, 1.0]
+    float p_specular = (F_guess.x + F_guess.y + F_guess.z) / 3.0f;
+
+    // Clamp the probability so neither lobe is ever completely starved (which causes black fireflies)
+    p_specular = clamp(p_specular, 0.1f, 0.9f);
+
+    // Pull RNG from payload
     float u1 = rnd(*prd->rng);
     float u2 = rnd(*prd->rng);
-    float u3 = rnd(*prd->rng);  // for lobe selection
+    float u3 = rnd(*prd->rng);
 
+    // 5. Evaluate the chosen BRDF
+    BSDFSample sample;
 
-    // View direction in tangent space
-    //float3 V_local = worldToTangent(V, normal, tangent, bitangent);
+    if (u3 < p_specular) {
+        // Evaluate Specular
+        sample = evaluateCookTorrance(Ve, alpha_x, alpha_y, u1, u2, F0);
+        if (sample.valid) {
+            // Energy conservation: divide by probability of taking this path
+            sample.weight = sample.weight / p_specular;
 
-    //// Safety: if V is below the surface (can happen with normal mapping or
-    //// backfacing geometry), flip it to avoid NaN in VNDF sampling
-    //if (V_local.z < EPS)
-    //    V_local.z = EPS;
-
-    // Stochastic lobe selection: specular or diffuse 
-    // Estimate Fresnel at the view angle (using NdotV as approximation for VdotH)
-    //float NdotV = clamp(dot(normal, V), 0.f, 1.f);
-    //float3 F_approx = fresnelSchlick(NdotV, F0);
-    //float  p_specular = clamp(luminance(F_approx), 0.1f, 0.9f);
-    //// Ensure some minimum diffuse contribution for dielectrics
-    //p_specular = metallic > 0.9f ? 1.0f : p_specular;
-
-    //float3 scatter_dir_world;
-    //float3 brdf_weight;
-
-    //if (u3 < p_specular)
-    //{
-    //    // Specular lobe: VNDF-sampled GGX reflection 
-
-    //    // Sample half vector in tangent space via VNDF
-    //    float3 Wm_local = SampleVNDF_GGX(V_local, alpha, u1, u2);
-
-    //    // Reflect view direction around half vector to get scattered direction
-    //    float3 L_local = reflect(-V_local, Wm_local);
-
-    //    // Discard below-surface samples (can happen at high roughness)
-    //    if (L_local.z <= 0.f) {
-    //        prd.done = 1u;
-    //        storeClosesthitRadiancePRD(prd);
-    //        return;
-    //    }
-
-    //    // Evaluate BRDF terms
-    //    float NdotL = clamp(L_local.z, 0.f, 1.f);  // in tangent space: L.z = dot(N,L)
-    //    float NdotH = clamp(Wm_local.z, 0.f, 1.f);
-    //    float VdotH = clamp(dot(V_local, Wm_local), 0.f, 1.f);
-
-    //    float3 F = fresnelSchlick(VdotH, F0);
-    //    float  G2 = G2_SmithCombined(NdotL, V_local.z, alpha2);
-    //    // D_GGX(NdotH, alpha2) * NdotL appears in the numerator,
-    //    // but with VNDF sampling the PDF = D_GGX * G1 * VdotH / NdotV,
-    //    // and the weight simplifies to: F * G2_combined * VdotH * NdotL / (G1 * NdotV * ...)
-    //    // Using the height-correlated G2_combined (which folds in the 4*NdotL*NdotV denom):
-    //    //   weight = F * G2 * VdotH / NdotH  (D and most G terms cancel)
-    //    // Reference: Heitz 2014, eq. 15 + VNDF importance sampling
-    //    brdf_weight = F * (G2 * VdotH * NdotL / (NdotH + 1e-7f));
-
-    //    // Divide by lobe selection probability
-    //    brdf_weight = brdf_weight / p_specular;
-
-    //    scatter_dir_world = tangentToWorld(L_local, normal, tangent, bitangent);
-    //}
-    //else
-    //{
-    //    // Diffuse lobe: cosine-weighted hemisphere sampling 
-    //    // Lambertian BRDF: f = base_color / pi
-    //    // PDF of cosine sampling: pdf = NdotL / pi
-    //    // Weight: f * NdotL / pdf = base_color   (pi and NdotL cancel)
-
-    //    // Sample cosine-weighted direction (Malley's method)
-    //    float r = sqrtf(u1);
-    //    float phi = 2.0f * M_PI * u2;
-    //    float3 L_local = make_float3(r * cosf(phi), r * sinf(phi),
-    //        sqrtf(fmaxf(0.f, 1.f - r * r)));
-
-    //    // Energy conservation: diffuse only carries the (1-F) complement
-    //    float3 F_at_normal = fresnelSchlick(clamp(L_local.z, 0.f, 1.f), F0);
-    //    float3 kD = (1.0f - F_at_normal) * (1.0f - metallic);
-    //    brdf_weight = kD * base_color;
-
-    //    // Divide by lobe selection probability
-    //    brdf_weight = brdf_weight / (1.0f - p_specular);
-
-    //    scatter_dir_world = tangentToWorld(L_local, normal, tangent, bitangent);
-    //}
- 
-
-    // 4. Evaluate the BRDF (This happens entirely in Ns tangent space)
-    BSDFSample sample = evaluateCookTorrance(Ve, alpha_x, alpha_y, u1, u2, F0);
+            // If roughness is very low, mark as delta-specular for Next Event Estimation (MIS)
+            prd->is_specular = (roughness < 0.05f) ? 1u : 0u;
+        }
+    }
+    else {
+        // Evaluate Diffuse
+        sample = evaluateLambertian(u1, u2, base_color, metallic);
+        if (sample.valid) {
+            sample.weight = sample.weight / (1.0f - p_specular);
+            prd->is_specular = 0u; // Diffuse is never a delta reflection
+        }
+    }
 
     if (!sample.valid) {
         prd->done = true;
         return;
     }
 
-    // 5. Transform sampled Li back to world space
+    // 6. Transform sampled Li back to world space
     float3 L_world = normalize(tangentToWorld(sample.Li, normal_s, tangent, bitangent));
 
-    // 6. Validate the outgoing Light ray against the true Geometry
+    // Validate the outgoing Light ray against the true Geometry
     if (dot(L_world, normal_g) <= 0.0f) {
-        // The BRDF generated a reflection that bounces back INSIDE the geometry.
-        // This is a light leak. Kill the path.
         prd->done = true;
         return;
     }
 
-    // 7. Success! Update the payload
-    // (Offset the origin using the GEOMETRY normal to prevent self-intersection)
-    // Fill payload 
-    // Multiply current throughput by the BRDF weight for this bounce.
+    // 7. Update Payload
     prd->throughput = prd->throughput * sample.weight;
     prd->next_origin = hit_pos + normal_g * EPS;
     prd->next_direction = L_world;
-    prd->radiance = make_float3(0.f);  // no NEE yet
-    prd->is_specular = 0u;               // false - diffuse/glossy, MIS applies
+    prd->radiance = make_float3(0.f);
     prd->done = 0u;
+
+    // Storing for Denoiser
     prd->albedo = base_color;
     prd->normal = normal_s;
 }

@@ -802,7 +802,7 @@ void OptixRenderer::buildIAS() {
 
         instance.instanceId = (unsigned int)i; // Set instance ID to the index of this instance, which can be used in shaders to identify which instance was hit
         instance.visibilityMask = 255; // Set visibility mask to 255 (all bits on) so that this instance is visible to all ray types
-        instance.sbtOffset = scene_instances[i].object->sbt_base; // Set SBT offset for this instance based on the SBT base index assigned during scene loading. This tells OptiX which hit group entries in the SBT correspond to this instance's geometry and materials.
+        instance.sbtOffset = scene_instances[i].object->sbt_base * RayType::COUNT;; // Set SBT offset for this instance based on the SBT base index assigned during scene loading. This tells OptiX which hit group entries in the SBT correspond to this instance's geometry and materials.
         instance.flags = OPTIX_INSTANCE_FLAG_NONE; // No special flags for this instance
         instance.traversableHandle = scene_instances[i].object->gas_handle; // Set the traversable handle for this instance to point to the GAS built for the corresponding scene object
     }
@@ -851,8 +851,10 @@ void OptixRenderer::buildIAS() {
 // Builds SBT constaining one hit record per material
 // Each record points to either HitGroupRecordCookTorrance or HitGroupDataGlass
 void OptixRenderer::buildSBT() {
-    const size_t max_stride = (sizeof(HitGroupRecordCookTorrance) > sizeof(HitGroupRecordGlass))
+    size_t max_stride = (sizeof(HitGroupRecordCookTorrance) > sizeof(HitGroupRecordGlass))
         ? sizeof(HitGroupRecordCookTorrance) : sizeof(HitGroupRecordGlass);
+
+    max_stride = ((max_stride + OPTIX_SBT_RECORD_ALIGNMENT - 1) / OPTIX_SBT_RECORD_ALIGNMENT) * OPTIX_SBT_RECORD_ALIGNMENT;
 
     // Count total materials first
     size_t total_materials = 0;
