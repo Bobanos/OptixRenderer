@@ -57,6 +57,7 @@ struct Params {
     int     rr_start_depth;
     int     samples_per_pixel;
     int     current_sample;
+    int     current_frame;
     unsigned int random_seed;
 
     EnvironmentMap envmap;
@@ -70,35 +71,24 @@ struct Params {
 
 //===================================================================================================
 
-// ------------------------------------------------------------------
-// RadiancePRD payload layout
-//
-// Register map (24 registers total):
-//   p0      : ray_type         (uint32, R by CH/MS) - 0 = radiance, 1 = shadow/occlusion
-//   p1..p3  : throughput       (float3, RW)
-//   p4       : done            (uint,   W by CH and MS, R by caller)
-//   p5..p7   : emitted         (float3, W by CH and MS, R by caller)
-//   p8..p10  : radiance        (float3, W by CH and MS, R by caller - unused for now, kept for NEE)
-//   p11..p13 : next_origin     (float3, W by CH, R by caller)
-//   p14..p16 : next_direction  (float3, W by CH, R by caller)
-//   p17      : is_specular     (uint,   W by CH, R by caller - for MIS later)
-//   p18..p20 : albedo          (float3, W by CH, R by caller - for denoiser guide)
-//   p21..p23 : normal          (float3, W by CH, R by caller - for denoiser guide)
-//   p24      : brdf_pdf        (float,  W by CH, R by caller - solid-angle PDF of the
-//                                        sampled scatter direction, used for MIS when
-//                                        the NEXT bounce implicitly hits a light)
-// ------------------------------------------------------------------
+enum RayType {
+    RADIANCE = 0,
+    OCCLUSION   = 1,
+    COUNT    = 2
+};
+
+struct PCG32 {
+    uint64_t state;
+    uint64_t inc; // Stream ID
+};
 
 // ------------------------------------------------------------------
-// RadiancePRD struct - holds path state communicated via payload registers
+// RadiancePRD struct 
 // ------------------------------------------------------------------
-struct RadiancePRD
-{
-    unsigned int ray_type;
+struct RadiancePRD{
     // Caller writes before trace, CH reads and writes back
     float3       throughput;    // current path weight (starts at 1,1,1)
-
-    // CH / MS write, caller reads after trace
+        // CH / MS write, caller reads after trace
     unsigned int done;          // 1 = path terminates (miss or absorbed)
     float3       emitted;       // Le at this surface (for emissive geometry)
     float3       radiance;      // direct light contribution (NEE result, added by CH)
@@ -108,6 +98,9 @@ struct RadiancePRD
     float3       albedo;        // Base color for diffuse materials, used for denoiser guide
     float3       normal;        // Surface normal at hit point, used for denoiser guide
     float        brdf_pdf;      // solid-angle PDF of the sampled scatter direction (for MIS)
+
+    float        alpha_threshold;
+    PCG32*       rng;           
 };
 
 //===================================================================================================

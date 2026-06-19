@@ -129,13 +129,11 @@ FLOAT3_DEVICE inline float3 refract(const float3& v, const float3& n, float eta)
     return eta * v + (eta * cos_theta - sqrt(k)) * n;
 }
 
-FLOAT3_DEVICE inline float luminance(float3 c)
-{
+FLOAT3_DEVICE inline float luminance(float3 c){
     return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 }
 
-FLOAT3_DEVICE inline float3 lerp3(float3 a, float3 b, float t)
-{
+FLOAT3_DEVICE inline float3 lerp3(float3 a, float3 b, float t){
     return a + t * (b - a);
 }
 

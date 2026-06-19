@@ -124,6 +124,8 @@ private:
     // Program groups
     OptixProgramGroup raygen_program_group = nullptr;
     OptixProgramGroup miss_program_group = nullptr;
+    OptixProgramGroup miss_occlusion_program_group = nullptr;
+    OptixProgramGroup hitgroup_occlusion_program_group = nullptr;
     OptixProgramGroup hitgroup_cooktorrance_program_group = nullptr;
     OptixProgramGroup hitgroup_glass_program_group = nullptr;
 

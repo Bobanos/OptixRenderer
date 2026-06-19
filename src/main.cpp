@@ -271,7 +271,7 @@ int main() {
         renderer = new OptixRenderer(width, height);
         renderer->initCUDA();
         renderer->initOptix();
-		renderer->loadScene(SceneID::ALLIED_AVENGER);
+		renderer->loadScene(SceneID::CORNELL_BOX);
         renderer->setupShaders();
         renderer->setupLighting();
 
@@ -373,7 +373,7 @@ int main() {
 
             float3 look = camera_controller.getFront();
             ImGui::Text("Front: (%.2f, %.2f, %.2f)", look.x, look.y, look.z);
-            ImGui::Text("Samples Accumulated: (%.2d)", renderer->getCurrentSample());
+            ImGui::Text("Frames Accumulated: (%.2d)", renderer->getCurrentSample());
             ImGui::Text("Speed: %.2f", camera_controller.getSpeed());
 
             ImGui::Separator();
@@ -502,7 +502,7 @@ int main() {
             }
 
             ImGui::SetNextItemWidth(100.0f);
-            if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 1.0f, 100.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
+            if (ImGui::DragFloat("Light Intensity", &light_intensity, 0.05f, 0.0f, 100.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
                 renderer->updateLightIntensity(light_intensity);
                 light_changed = true;
             }

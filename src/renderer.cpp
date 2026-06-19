@@ -320,7 +320,7 @@ void OptixRenderer::createModuleAndProgramGroups() {
     pipeline_compile_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
     pipeline_compile_options.usesMotionBlur = false;
     pipeline_compile_options.numAttributeValues = 2;
-    pipeline_compile_options.numPayloadValues = 25;
+    pipeline_compile_options.numPayloadValues = 2;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
     pipeline_compile_options.pipelineLaunchParamsSizeInBytes = sizeof(Params);
@@ -358,6 +358,20 @@ void OptixRenderer::createModuleAndProgramGroups() {
     descriptor_miss.miss.entryFunctionName = "__miss__envMap";
     OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_miss, 1, &pg_opts, log, &logSize, &miss_program_group));
 
+    OptixProgramGroupDesc descriptor_miss_occlusion = {};
+    descriptor_miss_occlusion.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+    descriptor_miss_occlusion.miss.module = module;
+    descriptor_miss_occlusion.miss.entryFunctionName = "__miss__occlusion";
+    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_miss_occlusion, 1, &pg_opts, log, &logSize, &miss_occlusion_program_group));
+
+    OptixProgramGroupDesc descriptor_hitgroup_occlusion = {};
+    descriptor_hitgroup_occlusion.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    descriptor_hitgroup_occlusion.hitgroup.moduleCH = nullptr;
+    descriptor_hitgroup_occlusion.hitgroup.entryFunctionNameCH = nullptr;
+    descriptor_hitgroup_occlusion.hitgroup.moduleAH = module;
+    descriptor_hitgroup_occlusion.hitgroup.entryFunctionNameAH = "__anyhit__occlusion";
+    OPTIX_CHECK(optixProgramGroupCreate(context, &descriptor_hitgroup_occlusion, 1, &pg_opts, log, &logSize, &hitgroup_occlusion_program_group));
+
     OptixProgramGroupDesc descriptor_hitgroup_cooktorrance = {};
     descriptor_hitgroup_cooktorrance.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     descriptor_hitgroup_cooktorrance.hitgroup.moduleCH = module;
@@ -382,12 +396,13 @@ void OptixRenderer::createPipeline() {
     OptixProgramGroup groups[] = {
         raygen_program_group,
         miss_program_group,
+        miss_occlusion_program_group,
+        hitgroup_occlusion_program_group,
         hitgroup_cooktorrance_program_group,
         hitgroup_glass_program_group
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
-    //pipeline_link_options.maxTraceDepth = 7;
     pipeline_link_options.maxTraceDepth = 1;
 
     char log[4096];
@@ -398,7 +413,7 @@ void OptixRenderer::createPipeline() {
         &pipeline_compile_options,
         &pipeline_link_options,
         groups,
-        4,
+        6,
         log,
         &logSize,
         &pipeline
@@ -841,113 +856,119 @@ void OptixRenderer::buildSBT() {
 
     // Count total materials first
     size_t total_materials = 0;
-    for (const auto& obj : loaded_scene_objects)
+    for (const auto& obj : loaded_scene_objects) {
         total_materials += obj.materials.size();
+    }
 
-    std::vector<char> hit_records(total_materials * max_stride, 0);
+    // 1. Allocate space for ALL ray types!
+    // Size = Total Materials * 2 (Radiance + Occlusion) * Size of largest record
+    std::vector<char> hit_records(total_materials * RayType::COUNT * max_stride, 0);
     int hit_record_count = 0;
 
     for (const auto& scene_object : loaded_scene_objects) {
         for (size_t i = 0; i < scene_object.materials.size(); ++i) {
             const auto& material = scene_object.materials[i];
 
-            uint32_t sbt_index = scene_object.sbt_base + (uint32_t)i; // Calculate the SBT index for this material based on the object's SBT base and material index
+            // 2. Base SBT index multiplied by RayType::COUNT to leave gaps for the second ray type
+            uint32_t base_sbt_index = (scene_object.sbt_base + (uint32_t)i) * RayType::COUNT;
+
+            // -------------------------------------------------------------
+            // SLOT A: Pack the RADIANCE Record (RayType::RADIANCE = 0)
+            // -------------------------------------------------------------
+            uint32_t radiance_sbt_index = base_sbt_index + RayType::RADIANCE;
 
             if (material.is_glass) {
-                HitGroupRecordGlass record;
+                HitGroupRecordGlass record = {};
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_glass_program_group, &record));
-                record.data.vertices = (ColoredVertex*)scene_object.d_vertices; // Set vertex buffer pointer for this record to the vertex buffer of the corresponding scene object
-                record.data.indices = (uint3*)scene_object.d_indices; // Set index buffer pointer for this record to the index buffer of the corresponding scene object
-                record.data.tint = material.albedo; // Set albedo color for lambert material in this record
-                record.data.emission = material.emission; // Set emission color for this material
-                if (!material.texture_paths.emissive_path.empty()) {
-                    record.data.emission_texture = loadTextureCached(material.texture_paths.emissive_path); // Load the emission texture for this material and set the texture handle in the record
-                }
-                else {
-                    record.data.emission_texture = 0; // If no emission texture, set texture handle to 0
-                }
-                if (!material.texture_paths.diffuse_path.empty()) {
-                    record.data.tint_texture = loadTextureCached(material.texture_paths.diffuse_path);
-                }
-                else {
-                    record.data.tint_texture = 0; // If no tint texture, set texture handle to 0
-                }
-                record.data.refraction_index = material.ior; // Set refraction index for glass material
+                record.data.vertices = (ColoredVertex*)scene_object.d_vertices;
+                record.data.indices = (uint3*)scene_object.d_indices;
+                record.data.tint = material.albedo;
+                record.data.emission = material.emission;
+                record.data.emission_texture = material.texture_paths.emissive_path.empty() ? 0 : loadTextureCached(material.texture_paths.emissive_path);
+                record.data.tint_texture = material.texture_paths.diffuse_path.empty() ? 0 : loadTextureCached(material.texture_paths.diffuse_path);
+                record.data.refraction_index = material.ior;
 
-                hit_records.resize(hit_records.size() + max_stride);
-                std::memcpy(hit_records.data() + sbt_index * max_stride, &record, sizeof(HitGroupRecordGlass)); // Copy the hit group record data into the correct position in the hit_records vector based on the calculated SBT index
-                ++hit_record_count;
+                std::memcpy(hit_records.data() + radiance_sbt_index * max_stride, &record, sizeof(HitGroupRecordGlass));
             }
             else {
-                HitGroupRecordCookTorrance record;
+                HitGroupRecordCookTorrance record = {};
                 OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_cooktorrance_program_group, &record));
-                record.data.vertices = (ColoredVertex*)scene_object.d_vertices; // Set vertex buffer pointer for this record to the vertex buffer of the corresponding scene object
-                record.data.indices = (uint3*)scene_object.d_indices; // Set index buffer pointer for this record to the index buffer of the corresponding scene object
-                record.data.base_color = material.base_color; // Set base color for Cook-Torrance material in this record
-                record.data.emission = material.emission; // Set emission color for this material
-
-                if (!material.texture_paths.diffuse_path.empty()) {
-                    record.data.albedo_texture = loadTextureCached(material.texture_paths.diffuse_path); // Load the diffuse texture for this material and set the texture handle in the record
-                }
-                else {
-                    record.data.albedo_texture = 0; // If no diffuse texture, set texture handle to 0
-                }
-
-                if (!material.texture_paths.emissive_path.empty()) {
-                    record.data.emission_texture = loadTextureCached(material.texture_paths.emissive_path); // Load the emission texture for this material and set the texture handle in the record
-                }
-                else {
-                    record.data.emission_texture = 0; // If no emission texture, set texture handle to 0
-                }
-
-                if (!material.texture_paths.alpha_path.empty()) { // Adjust to your actual path string name
-                    record.data.alpha_texture = loadTextureCached(material.texture_paths.alpha_path);
-                }
-                else {
-                    record.data.alpha_texture = 0; // 0 means not present / fully opaque material
-                }
+                record.data.vertices = (ColoredVertex*)scene_object.d_vertices;
+                record.data.indices = (uint3*)scene_object.d_indices;
+                record.data.base_color = material.base_color;
+                record.data.emission = material.emission;
+                record.data.albedo_texture = material.texture_paths.diffuse_path.empty() ? 0 : loadTextureCached(material.texture_paths.diffuse_path);
+                record.data.emission_texture = material.texture_paths.emissive_path.empty() ? 0 : loadTextureCached(material.texture_paths.emissive_path);
+                record.data.alpha_texture = material.texture_paths.alpha_path.empty() ? 0 : loadTextureCached(material.texture_paths.alpha_path);
 
                 record.data.roughness = material.roughness;
                 record.data.metallic = material.metallic;
                 record.data.specular_color = material.specular;
-
                 record.data.metallic_texture = 0;
                 record.data.roughness_texture = 0;
                 record.data.specular_texture = 0;
-                //record.data.albedo_texture = 0; // TODO REMOVE 
 
-
-                hit_records.resize(hit_records.size() + max_stride);
-                std::memcpy(hit_records.data() + sbt_index * max_stride, &record, sizeof(HitGroupRecordCookTorrance));
-                ++hit_record_count;
+                std::memcpy(hit_records.data() + radiance_sbt_index * max_stride, &record, sizeof(HitGroupRecordCookTorrance));
             }
+            hit_record_count++;
+
+            // -------------------------------------------------------------
+            // SLOT B: Pack the OCCLUSION Record (RayType::OCCLUSION = 1)
+            // -------------------------------------------------------------
+            uint32_t occlusion_sbt_index = base_sbt_index + RayType::OCCLUSION;
+
+            HitGroupRecordCookTorrance occ_record = {};
+
+            // IMPORTANT: hitgroup_occlusion_program_group should contain your shadow Any-Hit program
+            // and an EMPTY (null) Closest-Hit program!
+            OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_occlusion_program_group, &occ_record));
+
+            // Pass geometry data so the Any-Hit shader can calculate UVs for the alpha mask
+            occ_record.data.vertices = (ColoredVertex*)scene_object.d_vertices;
+            occ_record.data.indices = (uint3*)scene_object.d_indices;
+            occ_record.data.alpha_texture = material.texture_paths.alpha_path.empty() ? 0 : loadTextureCached(material.texture_paths.alpha_path);
+
+            std::memcpy(hit_records.data() + occlusion_sbt_index * max_stride, &occ_record, sizeof(HitGroupRecordCookTorrance));
+            hit_record_count++;
         }
     }
 
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_hg, hit_records.size()));
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_hg, hit_records.data(), hit_records.size(), cudaMemcpyHostToDevice));
 
+    // --- Raygen Record ---
     RayGenRecord raygen_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(raygen_program_group, &raygen_record));
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_rg, sizeof(RayGenRecord)));
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_rg, &raygen_record, sizeof(raygen_record), cudaMemcpyHostToDevice));
 
-    MissRecord miss_record = {};
-    OPTIX_CHECK(optixSbtRecordPackHeader(miss_program_group, &miss_record));
-    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_ms, sizeof(MissRecord)));
-    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_ms, &miss_record, sizeof(miss_record), cudaMemcpyHostToDevice));
+    // --- Miss Records (Now an array of 2!) ---
+    std::vector<MissRecord> miss_records(RayType::COUNT);
+
+    // Radiance Miss (Slot 0)
+    OPTIX_CHECK(optixSbtRecordPackHeader(miss_program_group, &miss_records[RayType::RADIANCE]));
+
+    // Occlusion Miss (Slot 1)
+    // NOTE: Ensure you create 'miss_occlusion_program_group' prior to this step!
+    OPTIX_CHECK(optixSbtRecordPackHeader(miss_occlusion_program_group, &miss_records[RayType::OCCLUSION]));
+
+    CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_ms, sizeof(MissRecord) * RayType::COUNT));
+    CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_ms, miss_records.data(), sizeof(MissRecord) * RayType::COUNT, cudaMemcpyHostToDevice));
 
     // Setup SBT
     sbt.raygenRecord = device_buffers.d_rg;
+
+    // Miss configuration
     sbt.missRecordBase = device_buffers.d_ms;
     sbt.missRecordStrideInBytes = sizeof(MissRecord);
-    sbt.missRecordCount = 1;
+    sbt.missRecordCount = RayType::COUNT;
+
+    // Hitgroup configuration
     sbt.hitgroupRecordBase = device_buffers.d_hg;
     sbt.hitgroupRecordStrideInBytes = max_stride;
     sbt.hitgroupRecordCount = hit_record_count;
 
-    DEBUG_LOG("[SBT] Built");
-
+    DEBUG_LOG("[SBT] Built with Radiance and Occlusion ray types.");
 }
 
 // Setup programs, module, pipeline, and SBT for the renderer.
@@ -967,6 +988,7 @@ void OptixRenderer::setupLighting() {
     params.max_bounce_depth = 8;   // Start with x bounces
     params.rr_start_depth = 3;      // Start Russian Roulette after x bounces
     params.samples_per_pixel = 1;  // Progressive sampling
+    params.current_frame = 0;
     params.current_sample = 0;
     params.random_seed = 1415;
 
@@ -1013,6 +1035,7 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
     CUDA_CHECK(cudaDeviceSynchronize());
 
     params.current_sample++;
+    params.current_frame++;
 }
 
 // Update the environment map scale and exposure parameters in the renderer's Params structure,
