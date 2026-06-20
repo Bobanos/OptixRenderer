@@ -294,6 +294,12 @@ static __forceinline__ __device__ float3 worldToTangent(const float3& v, const f
     return make_float3(dot(v, tangent), dot(v, bitangent), dot(v, n));
 }
 
+static __forceinline__ __device__ float power_heuristic(float pdf_a, float pdf_b) {
+    float a2 = pdf_a * pdf_a;
+    float b2 = pdf_b * pdf_b;
+    return a2 / (a2 + b2 + 1e-16f); // EPS prevents division by zero
+}
+
 // ------------------------------------------------------------------
 // BRDF functions 
 // Equations mainly from Eric Heitz's 2018 paper
@@ -446,6 +452,108 @@ inline __device__ BSDFSample evaluateLambertian(float U1, float U2, float3 base_
 }
 
 // ------------------------------------------------------------------
+// NEE functions
+// ------------------------------------------------------------------
+
+// Explicitly evaluates the combined BRDF (Specular + Diffuse) for a specific light direction.
+// We need this to calculate NEE weights, as we aren't generating a random ray here.
+static __forceinline__ __device__ void evaluateBRDF_NEE(
+    float3 Ve, float3 Ld, float alpha_x, float alpha_y,
+    float3 F0, float3 base_color, float metallic,
+    float3& brdf_val)
+{
+    brdf_val = make_float3(0.0f);
+    if (Ve.z <= 0.0f || Ld.z <= 0.0f) return;
+
+    // Specular Lobe
+    float3 H = normalize(Ve + Ld);
+    if (H.z > 0.0f) {
+        float VdotH = fmaxf(0.0f, dot(Ve, H));
+        float D = D_GGX(H, alpha_x, alpha_y);
+        float G2 = G2_GGX(Ve, Ld, alpha_x, alpha_y);
+        float3 F = F0 + (make_float3(1.0f) - F0) * powf(1.0f - VdotH, 5.0f);
+        brdf_val = brdf_val + (D * G2 * F) / (4.0f * Ve.z * Ld.z);
+    }
+
+    // Diffuse Lobe
+    float3 f_diff = base_color * (1.0f - metallic) / M_PI;
+    brdf_val = brdf_val + f_diff;
+}
+
+// Computes the PDF of our stochastic lobe selection choosing a specific direction
+static __forceinline__ __device__ float computeBRDFPdf(float3 Ve, float3 Ld, float alpha_x, float alpha_y, float p_specular) {
+    float pdf_spec = 0.0f;
+    float3 H = normalize(Ve + Ld);
+    if (H.z > 0.0f && Ve.z > 0.0f && Ld.z > 0.0f) {
+        float D = D_GGX(H, alpha_x, alpha_y);
+        float G1 = G1_GGX(Ve, alpha_x, alpha_y);
+        pdf_spec = (G1 * D) / (4.0f * Ve.z); // The exact VNDF PDF
+    }
+    float pdf_diff = fmaxf(0.0f, Ld.z / M_PI);
+
+    return (pdf_spec * p_specular) + (pdf_diff * (1.0f - p_specular));
+}
+
+// Samples a random point on an emissive triangle
+static __forceinline__ __device__ void sampleLight(
+    const Params& params, float3 hit_pos,
+    float u1, float u2, float u3,
+    float3& light_dir, float& light_dist, float3& light_radiance, float& light_pdf)
+{
+    light_pdf = 0.0f;
+    light_radiance = make_float3(0.f);
+
+    if (params.num_emissive_triangles == 0) return;
+
+    // A. Binary search the CDF to pick a light based on its power (luminance * area)
+    int left = 0;
+    int right = params.num_emissive_triangles - 1;
+    int light_idx = right;
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+        if (params.emissive_triangles[mid].cdf >= u1) {
+            light_idx = mid;
+            right = mid - 1;
+        }
+        else {
+            left = mid + 1;
+        }
+    }
+
+    EmissiveTriangle tri = params.emissive_triangles[light_idx];
+
+    // B. Uniformly sample a point on the chosen triangle
+    float sq = sqrtf(u2);
+    float u = 1.0f - sq;
+    float v = u3 * sq;
+    float3 p = tri.v0 * u + tri.v1 * v + tri.v2 * (1.0f - u - v);
+
+    // Calculate normal and distance
+    float3 edge1 = tri.v1 - tri.v0;
+    float3 edge2 = tri.v2 - tri.v0;
+    float3 n = normalize(cross(edge1, edge2));
+
+    float3 dir = p - hit_pos;
+    float dist2 = dot(dir, dir);
+    light_dist = sqrtf(dist2);
+    light_dir = dir / light_dist;
+
+    float cos_theta = dot(n, -light_dir);
+
+    if (cos_theta > 0.0f) {
+        light_radiance = tri.emission;
+
+        // C. Calculate the exact PDF of picking this point
+        // PDF = P(picking triangle) * P(picking point on triangle) * Jacobian(Area to Solid Angle)
+        // Because P(triangle) is proportional to (luminance * area), the Area elegantly cancels out!
+        float pdf_area = luminance(tri.emission) / params.total_emissive_weight;
+
+        // Convert area PDF to solid angle PDF using the distance and angle
+        light_pdf = pdf_area * (dist2 / cos_theta);
+    }
+}
+
+// ------------------------------------------------------------------
 // Environment map helpers
 // ------------------------------------------------------------------
 __device__ float2 dirToEnvmapUV(float3 dir){
@@ -474,11 +582,10 @@ extern "C" __global__ void __raygen__pathTracer(){
 
     uint32_t seed0, seed1;
     tea_seed(pixel_index, params.current_frame, seed0, seed1);
-    // Initialize the PCG32 state
-    PCG32 rng;
+
+    PCG32 rng;  // Random number generator
     rng.state = ((uint64_t)seed0 << 32) | seed1;
-    rng.inc = pixel_index; // Ensuring unique streams per pixel prevents structural correlation
-    // Optional: Advance the state once to flush out the initial sequence
+    rng.inc = pixel_index;
     pcg32_random(rng);
 
     // Per-pixel sample loop
@@ -487,9 +594,8 @@ extern "C" __global__ void __raygen__pathTracer(){
     float3 frame_albedo = make_float3(0.f, 0.f, 0.f);
     float3 frame_normal = make_float3(0.f, 0.f, 0.f);
 
-    for (int s = 0; s < params.samples_per_pixel; ++s){        
+    for (int s = 0; s < params.samples_per_pixel; ++s) {
 
-        // Primary ray (pinhole camera, subpixel jitter for AA)
         float u = ((float)idx.x + rnd(rng)) / (float)params.width;
         float v = ((float)idx.y + rnd(rng)) / (float)params.height;
 
@@ -501,14 +607,15 @@ extern "C" __global__ void __raygen__pathTracer(){
             - params.camera.origin
         );
 
-        // Path state
-        float3 throughput = make_float3(1.f, 1.f, 1.f);
-        float3 radiance = make_float3(0.f, 0.f, 0.f);
+        float3 throughput = make_float3(1.f);
+        float3 radiance = make_float3(0.f);
 
-        // Iterative bounce loop
-        for (int bounce = 0; bounce <= params.max_bounce_depth; ++bounce){
-            // Initialize payload for this trace call.
-            // throughput and seed are passed IN to the CH shader.
+        // Variables to carry context from the previous bounce
+        float prev_btdf_pdf = 0.0f;
+        unsigned int prev_is_specular = 1u; // Primary ray acts like a perfect specular bounce
+
+        for (int bounce = 0; bounce <= params.max_bounce_depth; ++bounce) {
+
             RadiancePRD prd = {};
             prd.throughput = throughput;
             prd.done = 0u;
@@ -517,57 +624,51 @@ extern "C" __global__ void __raygen__pathTracer(){
 
             traceRadiance(
                 params.traversable,
-                ray_origin,
-                ray_dir,
-                EPS,
-                1e16f,
-                prd
+                ray_origin, ray_dir,
+                EPS, 1e16f, prd
             );
 
-            bool occluded = traceOcclusion(
-                params.traversable,
-                ray_origin,
-                ray_dir,
-                EPS,
-                1e16f,
-                rnd(rng)
-            );
+            // 1. Accumulate Light Source Emission (Implicit/BRDF hitting a light)
+            if (luminance(prd.emitted) > 0.0f) {
+                // If it's the primary ray OR we bounced off a mirror, NEE cannot sample it. 
+                // So we give it 100% weight.
+                if (bounce == 0 || prev_is_specular) {
+                    radiance = radiance + (throughput * prd.emitted);
+                }
+                // Otherwise, MIS: Balance between BRDF probability and Light sampling probability
+                else {
+                    float mis_weight = power_heuristic(prev_btdf_pdf, prd.hit_light_pdf);
+                    //float mis_weight = 1.0f;
+                    radiance = radiance + (throughput * prd.emitted * mis_weight);
+                }
+            }
 
-            // Accumulate emissive / environment light 
-            // prd.emitted is Le at this surface (or sky radiance from miss).
-            radiance = radiance + (throughput * prd.emitted);
+            // 2. Accumulate Direct Lighting (Next Event Estimation)
+            // prd.radiance was strictly calculated and shadow-tested in the Closest Hit program
+            radiance = radiance + (throughput * prd.radiance);
 
-            // prd.radiance is reserved for NEE direct light (added here when implemented)
-            //radiance = radiance + prd.radiance;  // uncomment when NEE is in place
+            if (prd.done) break;
 
-            //  Terminate if miss shader or surface flagged path as done 
-            if (prd.done)
-                break;
-
+            // Denoiser layers
             if (bounce == 0) {
                 frame_albedo = frame_albedo + prd.albedo;
                 frame_normal = frame_normal + prd.normal;
             }
 
-            // Update throughput with BRDF weight written by CH shader 
-            // CH writes the new (attenuated) throughput back into prd.throughput.
+            // Update state for the NEXT loop iteration
             throughput = prd.throughput;
+            prev_btdf_pdf = prd.btdf_pdf;     // Cache the PDF of the ray we just shot
+            prev_is_specular = prd.is_specular;
 
-            // Russian Roulette path termination 
-            // Skip RR for the first rr_start_depth bounces to avoid bias
-            // on direct and first-indirect lighting.
-            if (bounce >= params.rr_start_depth){
+            // Russian Roulette
+            if (bounce >= params.rr_start_depth) {
                 float q = fmaxf(0.05f, 1.0f - luminance(throughput));
-                if (rnd(rng) < q)
-                    break;
+                if (rnd(rng) < q) break;
                 throughput = throughput * (1.0f / (1.0f - q));
             }
 
-            // Safety: terminate paths with negligible throughput (numerical stability)
-            if (luminance(throughput) < 1e-6f)
-                break;
+            if (luminance(throughput) < 1e-6f) break;
 
-            // Advance ray to next bounce
             ray_origin = prd.next_origin;
             ray_dir = prd.next_direction;
         }
@@ -671,87 +772,133 @@ extern "C" __global__ void __closesthit__cookTorrance()
     const HitGroupDataCookTorrance* sbt = (const HitGroupDataCookTorrance*)optixGetSbtDataPointer();
     RadiancePRD* prd = get_prd<RadiancePRD>();
 
-    // Get world-space ray and intersection data
     const float3 ray_dir = normalize(optixGetWorldRayDirection());
     const float3 ray_orig = optixGetWorldRayOrigin();
     const float  hit_t = optixGetRayTmax();
     const float3 hit_pos = ray_orig + hit_t * ray_dir;
 
     const float2 uv = getInterpolatedUV(sbt);
-    float3 normal_s = getInterpolatedNormal(sbt);  // world space
+    float3 normal_s = getInterpolatedNormal(sbt);
     float3 normal_g = getGeometricNormal(sbt);
 
-    // Ensure the geometry normal is facing the incoming ray
+    // Normal Flipping
     if (dot(normal_g, ray_dir) > 0.0f) {
         normal_g = -normal_g;
-        normal_s = -normal_s; // Flip shading normal to match
+        normal_s = -normal_s;
     }
 
-    // Validate the incoming View ray against the true Geometry
     float3 V_world = -ray_dir;
     if (dot(V_world, normal_g) <= 0.0f) {
         prd->done = true;
         return;
     }
 
-    // Build the Tangent Frame using the SHADING normal
+    // Build the Tangent Frame 
     float3 tangent, bitangent;
     buildONB(normal_s, tangent, bitangent);
-
-    // Project world_V onto Tangent Space
     float3 Ve = worldToTangent(V_world, normal_s, tangent, bitangent);
 
-    // 2. Fetch Material Parameters 
+    // Fetch Material Parameters 
     float  roughness = getRoughness(sbt, uv);
     float3 base_color = getBaseColor(sbt, uv);
     float  metallic = getMetallic(sbt, uv);
     float  alpha_x = clamp(roughness * roughness, 0.001f, 1.f);
     float  alpha_y = alpha_x;
 
-    // Emissive (perfect for loading emissive textures later)
     prd->emitted = getEmissive(sbt, uv);
 
-    // 3. F0 Calculation (Metallic Workflow)
-    // Dielectrics have ~4% reflectivity (0.04). Metals use their base color as F0.
+    // Determine PDF of hitting this exact point directly via Light Sampling (for RayGen MIS)
+    if (luminance(prd->emitted) > 0.0f) {
+        float pdf_area = luminance(prd->emitted) / params.total_emissive_weight;
+        float cos_theta_light = fmaxf(1e-6f, dot(normal_g, V_world));
+        prd->hit_light_pdf = pdf_area * (hit_t * hit_t) / cos_theta_light;
+    }
+    else {
+        prd->hit_light_pdf = 0.0f;
+    }
+
     float3 F0_dielectric = make_float3(0.04f);
     float3 F0 = F0_dielectric * (1.0f - metallic) + base_color * metallic;
 
-    // 4. Lobe Selection Probability
-    // Estimate how reflective the surface is at this viewing angle using Schlick
-    float VdotN = fmaxf(0.0f, Ve.z); // In tangent space, N is simply (0,0,1)
+    float VdotN = fmaxf(0.0f, Ve.z);
     float3 F_guess = F0 + (make_float3(1.0f) - F0) * powf(1.0f - VdotN, 5.0f);
+    float p_specular = clamp((F_guess.x + F_guess.y + F_guess.z) / 3.0f, 0.1f, 0.9f);
 
-    // Average the RGB reflectivity to get a probability [0.0, 1.0]
-    float p_specular = (F_guess.x + F_guess.y + F_guess.z) / 3.0f;
+    prd->radiance = make_float3(0.0f); // Reset NEE container
 
-    // Clamp the probability so neither lobe is ever completely starved (which causes black fireflies)
-    p_specular = clamp(p_specular, 0.1f, 0.9f);
+    // ------------------------------------------------------------------
+    //  NEXT EVENT ESTIMATION (Direct Light Sampling)
+    // ------------------------------------------------------------------
+    float3 light_dir, light_radiance;
+    float light_dist, light_pdf;
 
-    // Pull RNG from payload
-    float u1 = rnd(*prd->rng);
-    float u2 = rnd(*prd->rng);
-    float u3 = rnd(*prd->rng);
+    // Pass PRNG state safely
+    float l_u1 = rnd(*prd->rng), l_u2 = rnd(*prd->rng), l_u3 = rnd(*prd->rng);
 
-    // 5. Evaluate the chosen BRDF
+    sampleLight(params, hit_pos, l_u1, l_u2, l_u3, light_dir, light_dist, light_radiance, light_pdf);
+
+    if (light_pdf > 0.0f) {
+        float3 Ld_tangent = worldToTangent(light_dir, normal_s, tangent, bitangent);
+
+        // Only evaluate if light is physically above the horizon
+        if (Ld_tangent.z > 0.0f && dot(light_dir, normal_g) > 0.0f) {
+
+            float3 brdf_val;
+            evaluateBRDF_NEE(Ve, Ld_tangent, alpha_x, alpha_y, F0, base_color, metallic, brdf_val);
+
+            // What is the probability we would have generated this ray blindly via the BRDF?
+            float brdf_pdf = computeBRDFPdf(Ve, Ld_tangent, alpha_x, alpha_y, p_specular);
+
+            if (brdf_pdf > 0.0f) {
+                float mis_weight = power_heuristic(light_pdf, brdf_pdf);
+                //float mis_weight = 1.0f;
+
+                float shadow_tmax = light_dist * 0.999f;
+
+                bool occluded = traceOcclusion(
+                    params.traversable,
+                    hit_pos + normal_g * EPS, // Origin (pushed off the floor)
+                    light_dir,                // Direction
+                    EPS,                      // tmin
+                    shadow_tmax,              // tmax (stops right before the light)
+                    rnd(*prd->rng)
+                );
+
+
+                //// Trace the shadow ray locally
+                //bool occluded = traceOcclusion(
+                //    params.traversable, hit_pos + normal_g * EPS, light_dir,
+                //    0.0f, light_dist - EPS, rnd(*prd->rng)
+                //);
+
+                //occluded = false;
+
+                if (occluded) {
+                    // Note: Ld_tangent.z IS the cos(theta) term in the rendering equation!
+                    prd->radiance = light_radiance * brdf_val * Ld_tangent.z * mis_weight / light_pdf;
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  BRDF SCATTERING (Indirect Bounces)
+    // ------------------------------------------------------------------
+    float u1 = rnd(*prd->rng), u2 = rnd(*prd->rng), u3 = rnd(*prd->rng);
     BSDFSample sample;
 
     if (u3 < p_specular) {
-        // Evaluate Specular
         sample = evaluateCookTorrance(Ve, alpha_x, alpha_y, u1, u2, F0);
         if (sample.valid) {
-            // Energy conservation: divide by probability of taking this path
             sample.weight = sample.weight / p_specular;
-
-            // If roughness is very low, mark as delta-specular for Next Event Estimation (MIS)
             prd->is_specular = (roughness < 0.05f) ? 1u : 0u;
         }
     }
     else {
-        // Evaluate Diffuse
         sample = evaluateLambertian(u1, u2, base_color, metallic);
         if (sample.valid) {
             sample.weight = sample.weight / (1.0f - p_specular);
-            prd->is_specular = 0u; // Diffuse is never a delta reflection
+            prd->is_specular = 0u;
         }
     }
 
@@ -760,27 +907,25 @@ extern "C" __global__ void __closesthit__cookTorrance()
         return;
     }
 
-    // 6. Transform sampled Li back to world space
     float3 L_world = normalize(tangentToWorld(sample.Li, normal_s, tangent, bitangent));
 
-    // Validate the outgoing Light ray against the true Geometry
     if (dot(L_world, normal_g) <= 0.0f) {
         prd->done = true;
         return;
     }
 
-    // 7. Update Payload
+    // Calculate exact PDF of the ray we just shot for MIS on the NEXT hit
+    prd->btdf_pdf = computeBRDFPdf(Ve, sample.Li, alpha_x, alpha_y, p_specular);
+
+    // Finalize Payload
     prd->throughput = prd->throughput * sample.weight;
     prd->next_origin = hit_pos + normal_g * EPS;
     prd->next_direction = L_world;
-    prd->radiance = make_float3(0.f);
     prd->done = 0u;
 
-    // Storing for Denoiser
     prd->albedo = base_color;
     prd->normal = normal_s;
 }
-
 // ==================================================================================
 // ANYHIT - Opacity map alpha test 
 // ==================================================================================

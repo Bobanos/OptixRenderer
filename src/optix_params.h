@@ -97,7 +97,8 @@ struct RadiancePRD{
     unsigned int is_specular;   // 1 = delta BRDF event (glass) - skip NEE MIS later
     float3       albedo;        // Base color for diffuse materials, used for denoiser guide
     float3       normal;        // Surface normal at hit point, used for denoiser guide
-    float        brdf_pdf;      // solid-angle PDF of the sampled scatter direction (for MIS)
+    float        btdf_pdf;      // The PDF of the direction the BRDF chose to scatter the ray
+    float        hit_light_pdf; // The PDF of choosing this exact hit point if we had sampled the lights directly
 
     float        alpha_threshold;
     PCG32*       rng;           

@@ -403,7 +403,7 @@ void OptixRenderer::createPipeline() {
     };
 
     OptixPipelineLinkOptions pipeline_link_options = {};
-    pipeline_link_options.maxTraceDepth = 1;
+    pipeline_link_options.maxTraceDepth = 2;
 
     char log[4096];
     size_t logSize = sizeof(log);
@@ -862,7 +862,6 @@ void OptixRenderer::buildSBT() {
         total_materials += obj.materials.size();
     }
 
-    // 1. Allocate space for ALL ray types!
     // Size = Total Materials * 2 (Radiance + Occlusion) * Size of largest record
     std::vector<char> hit_records(total_materials * RayType::COUNT * max_stride, 0);
     int hit_record_count = 0;
@@ -871,7 +870,7 @@ void OptixRenderer::buildSBT() {
         for (size_t i = 0; i < scene_object.materials.size(); ++i) {
             const auto& material = scene_object.materials[i];
 
-            // 2. Base SBT index multiplied by RayType::COUNT to leave gaps for the second ray type
+            // Base SBT index multiplied by RayType::COUNT to leave gaps for the second ray type
             uint32_t base_sbt_index = (scene_object.sbt_base + (uint32_t)i) * RayType::COUNT;
 
             // -------------------------------------------------------------
@@ -921,8 +920,6 @@ void OptixRenderer::buildSBT() {
 
             HitGroupRecordCookTorrance occ_record = {};
 
-            // IMPORTANT: hitgroup_occlusion_program_group should contain your shadow Any-Hit program
-            // and an EMPTY (null) Closest-Hit program!
             OPTIX_CHECK(optixSbtRecordPackHeader(hitgroup_occlusion_program_group, &occ_record));
 
             // Pass geometry data so the Any-Hit shader can calculate UVs for the alpha mask
@@ -944,14 +941,13 @@ void OptixRenderer::buildSBT() {
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_rg, sizeof(RayGenRecord)));
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_rg, &raygen_record, sizeof(raygen_record), cudaMemcpyHostToDevice));
 
-    // --- Miss Records (Now an array of 2!) ---
+    // --- Miss Records ---
     std::vector<MissRecord> miss_records(RayType::COUNT);
 
     // Radiance Miss (Slot 0)
     OPTIX_CHECK(optixSbtRecordPackHeader(miss_program_group, &miss_records[RayType::RADIANCE]));
 
     // Occlusion Miss (Slot 1)
-    // NOTE: Ensure you create 'miss_occlusion_program_group' prior to this step!
     OPTIX_CHECK(optixSbtRecordPackHeader(miss_occlusion_program_group, &miss_records[RayType::OCCLUSION]));
 
     CUDA_CHECK(cudaMalloc((void**)&device_buffers.d_ms, sizeof(MissRecord) * RayType::COUNT));
