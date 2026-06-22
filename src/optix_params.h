@@ -58,7 +58,6 @@ struct Params {
     int     samples_per_pixel;
     int     current_sample;
     int     current_frame;
-    unsigned int random_seed;
 
     EnvironmentMap envmap;
     float3 background_color;

@@ -7,8 +7,17 @@ project(OptiXRenderer LANGUAGES C CXX CUDA)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 20)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # Set this according to your GPU (RTX 30xx = 86, RTX 40xx = 89)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+set(CMAKE_CUDA_ARCHITECTURES 75 86 89 90)
 
 # ------------------------------------------------------------------------------
 # CUDA
@@ -74,7 +83,7 @@ target_include_directories(optix_renderer PRIVATE
 )
 
 target_link_libraries(optix_renderer PRIVATE
-    CUDA::cudart
+    CUDA::cudart_static
     glfw
     glad
     imgui
@@ -84,6 +93,7 @@ set_target_properties(optix_renderer PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 
+
 # Copy assets to build directory so the exe can find them
 # when run outside of VS (e.g. from terminal in build folder)
 add_custom_command(TARGET optix_renderer POST_BUILD
@@ -91,8 +101,8 @@ add_custom_command(TARGET optix_renderer POST_BUILD
         "${CMAKE_SOURCE_DIR}/assets"
         "$<TARGET_FILE_DIR:optix_renderer>/assets"
     COMMENT "Copying assets to build directory"
-)
-
+    )
+ 
 add_custom_command(TARGET optix_renderer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_BINARY_DIR}/generated"
@@ -146,7 +156,7 @@ endfunction()
 compile_optix_ir(optix_shaders
     OUTPUT_DIR ${CMAKE_BINARY_DIR}/generated/optixir
     SOURCES
-        ${CMAKE_SOURCE_DIR}/cuda/SimplePathTracer.cu
+        ${CMAKE_SOURCE_DIR}/cuda/PathTracer.cu
 )
 
 # Ensure shaders are built before the executable runs

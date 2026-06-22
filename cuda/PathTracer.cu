@@ -138,7 +138,7 @@ static __forceinline__ __device__ bool traceOcclusion(
         RayType::OCCLUSION,    // missSBTIndex (1)// miss SBT index 
         is_visible, alpha_payload
     );
-    return (is_visible != 0);
+    return (is_visible == 0);
 }
 
 // ------------------------------------------------------------------
@@ -264,6 +264,7 @@ static __forceinline__ __device__ float3 getSpecularColor( const HitGroupDataCoo
     if (sbt->specular_texture != 0) {
         float4 t = tex2D<float4>(sbt->specular_texture, uv.x, uv.y);
         return make_float3(t.x, t.y, t.z);
+        //return make_float3(t.w, t.w, t.w);
     }
     return sbt->specular_color;
 }
@@ -494,20 +495,17 @@ static __forceinline__ __device__ float computeBRDFPdf(float3 Ve, float3 Ld, flo
     return (pdf_spec * p_specular) + (pdf_diff * (1.0f - p_specular));
 }
 
-// Samples a random point on an emissive triangle
-static __forceinline__ __device__ void sampleLight(
-    const Params& params, float3 hit_pos,
-    float u1, float u2, float u3,
+inline __device__ void sampleMeshLight(
+    const Params& params, float3 hit_pos, PCG32& rng,
     float3& light_dir, float& light_dist, float3& light_radiance, float& light_pdf)
 {
     light_pdf = 0.0f;
     light_radiance = make_float3(0.f);
-
     if (params.num_emissive_triangles == 0) return;
 
-    // A. Binary search the CDF to pick a light based on its power (luminance * area)
-    int left = 0;
-    int right = params.num_emissive_triangles - 1;
+    float u1 = rnd(rng), u2 = rnd(rng), u3 = rnd(rng);
+
+    int left = 0, right = params.num_emissive_triangles - 1;
     int light_idx = right;
     while (left <= right) {
         int mid = left + (right - left) / 2;
@@ -521,14 +519,11 @@ static __forceinline__ __device__ void sampleLight(
     }
 
     EmissiveTriangle tri = params.emissive_triangles[light_idx];
-
-    // B. Uniformly sample a point on the chosen triangle
     float sq = sqrtf(u2);
     float u = 1.0f - sq;
     float v = u3 * sq;
     float3 p = tri.v0 * u + tri.v1 * v + tri.v2 * (1.0f - u - v);
 
-    // Calculate normal and distance
     float3 edge1 = tri.v1 - tri.v0;
     float3 edge2 = tri.v2 - tri.v0;
     float3 n = normalize(cross(edge1, edge2));
@@ -539,20 +534,115 @@ static __forceinline__ __device__ void sampleLight(
     light_dir = dir / light_dist;
 
     float cos_theta = dot(n, -light_dir);
+    if (cos_theta < 0.0f) cos_theta = -cos_theta; // Support double-sided emissive meshes
 
     if (cos_theta > 0.0f) {
         light_radiance = tri.emission;
-
-        // C. Calculate the exact PDF of picking this point
-        // PDF = P(picking triangle) * P(picking point on triangle) * Jacobian(Area to Solid Angle)
-        // Because P(triangle) is proportional to (luminance * area), the Area elegantly cancels out!
         float pdf_area = luminance(tri.emission) / params.total_emissive_weight;
-
-        // Convert area PDF to solid angle PDF using the distance and angle
         light_pdf = pdf_area * (dist2 / cos_theta);
     }
 }
 
+// 2. Explicit Environment Map Sampler
+inline __device__ void sampleEnvMapForNEE(
+    const Params& params, PCG32& rng,
+    float3& light_dir, float& light_dist, float3& light_radiance, float& light_pdf)
+{
+    light_pdf = 0.0f;
+    light_radiance = make_float3(0.0f);
+    light_dist = 1e7f; // Infinity
+
+    float r1 = rnd(rng);
+    float r2 = rnd(rng);
+
+    // A. Binary search marginal CDF for row (v)
+    int top = 0, bottom = params.envmap.height - 1;
+    int v = bottom;
+    while (top <= bottom) {
+        int mid = top + (bottom - top) / 2;
+        // tex1D with unnormalized coords takes integer + 0.5f to hit center of texel
+        if (tex1D<float>(params.envmap.cdf_marginal_v, mid + 0.5f) >= r1) {
+            v = mid;
+            bottom = mid - 1;
+        }
+        else {
+            top = mid + 1;
+        }
+    }
+
+    // B. Binary search conditional CDF for col (u)
+    int left = 0, right = params.envmap.width - 1;
+    int u = right;
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+        if (tex2D<float>(params.envmap.cdf_conditional_u, mid + 0.5f, v + 0.5f) >= r2) {
+            u = mid;
+            right = mid - 1;
+        }
+        else {
+            left = mid + 1;
+        }
+    }
+
+    // C. Map to spherical coordinates with continuous jitter to prevent banding
+    float fx = ((float)u + rnd(rng)) / (float)params.envmap.width;
+    float fy = ((float)v + rnd(rng)) / (float)params.envmap.height;
+
+    float phi = fx * 2.0f * M_PI;
+    float theta = fy * M_PI;
+    float sin_theta = sinf(theta);
+
+    // Standard Equirectangular to Cartesian (Y-up projection)
+    light_dir = make_float3(
+        sin_theta * cosf(phi),
+        cosf(theta),
+        sin_theta * sinf(phi)
+    );
+
+    // D. Fetch actual HDR radiance
+    float4 tex_val = tex2D<float4>(params.envmap.texture, fx, fy);
+    float scale_factor = params.envmap.scale * exp2f(params.envmap.exposure);
+    light_radiance = make_float3(tex_val.x, tex_val.y, tex_val.z) * scale_factor;
+
+    // E. Calculate Solid Angle PDF (Notice how sin_theta mathematically cancels out!)
+    float lum = luminance(make_float3(tex_val.x, tex_val.y, tex_val.z)); // Unscaled luminance
+    if (lum == 0.0f || sin_theta == 0.0f) {
+        light_pdf = 0.0f;
+        return;
+    }
+
+    light_pdf = (lum * params.envmap.width * params.envmap.height) /
+        (params.envmap.total_weight * 2.0f * M_PI * M_PI);
+}
+
+// 3. Unified Light Sampler (Selects between Mesh and EnvMap based on total energy)
+inline __device__ void sampleLight(
+    const Params& params, float3 hit_pos, PCG32& rng,
+    float3& light_dir, float& light_dist, float3& light_radiance, float& light_pdf)
+{
+    light_pdf = 0.0f;
+    light_radiance = make_float3(0.0f);
+
+    float weight_mesh = params.total_emissive_weight;
+    // Scale EnvMap weight so it competes fairly with physical mesh light intensities
+    float scale_factor = params.envmap.scale * exp2f(params.envmap.exposure);
+    float weight_env = params.envmap.has_envmap ? (params.envmap.total_weight * scale_factor) : 0.0f;
+
+    float total_weight = weight_mesh + weight_env;
+    if (total_weight <= 0.0f) return;
+
+    // Probability of choosing to sample a mesh light vs the environment map
+    float p_mesh = weight_mesh / total_weight;
+
+    if (rnd(rng) < p_mesh) {
+        sampleMeshLight(params, hit_pos, rng, light_dir, light_dist, light_radiance, light_pdf);
+        light_pdf *= p_mesh;
+    }
+    else {
+        sampleEnvMapForNEE(params, rng, light_dir, light_dist, light_radiance, light_pdf);
+        light_pdf *= (1.0f - p_mesh);
+    }
+}
 // ------------------------------------------------------------------
 // Environment map helpers
 // ------------------------------------------------------------------
@@ -571,7 +661,6 @@ __device__ float3 sampleEnvmap(cudaTextureObject_t tex, float3 dir){
 
 // ==================================================================================
 // RAYGEN
-// Accumulation: running average across frames using params.current_sample.
 // ==================================================================================
 extern "C" __global__ void __raygen__pathTracer(){
     
@@ -716,7 +805,7 @@ extern "C" __global__ void __raygen__pathTracer(){
     params.normal_buffer[pixel_index] = make_float4(current_normal.x, current_normal.y, current_normal.z, 1.0f);
 
     //params.accum_buffer[pixel_index] = make_float4(current_albedo.x, current_albedo.y, current_albedo.z, 1.0f);
-    //params.accum_buffer[pixel_index] = make_float4(accumulated.x, accumulated.y, accumulated.z, 1.0f);
+    //params.accum_buffer[pixel_index] = make_float4(current_normal.x, current_normal.y, current_normal.z, 1.0f);
 }
 
 
@@ -751,7 +840,7 @@ extern "C" __global__ void __miss__occlusion()
 //
 // Implements:
 //   - GGX NDF + height-correlated Smith G2 + Schlick Fresnel
-//   - VNDF importance sampling (Dupuy & Benyoub 2023)
+//   - VNDF importance sampling (Eric Heitz 2018)
 //   - Metallic-roughness workflow:
 //       F0      = lerp(0.04, base_color, metallic)
 //       diffuse = (1 - F) * (1 - metallic) * base_color / pi
@@ -759,16 +848,9 @@ extern "C" __global__ void __miss__occlusion()
 //   - Stochastic lobe selection (diffuse vs specular) based on luminance(F)
 //   - Emissive support via emission constant or texture
 //   - RNG state carried through payload for per-bounce uncorrelated samples
-//
-// Material sources (from MTL via host-side SBT filling):
-//   base_color      <- map_Kd texture or Kd constant
-//   roughness       <- map_Pr texture or sqrt(2/(Ns+2)) from Ns
-//   metallic        <- map_Pm texture or Kd/Ks luminance heuristic
-//   specular_color  <- map_Ks texture or Ks constant (for per-texel F0)
 // ==================================================================================
 extern "C" __global__ void __closesthit__cookTorrance()
 {
-    // 1. Get Payload and Hit Info
     const HitGroupDataCookTorrance* sbt = (const HitGroupDataCookTorrance*)optixGetSbtDataPointer();
     RadiancePRD* prd = get_prd<RadiancePRD>();
 
@@ -833,9 +915,9 @@ extern "C" __global__ void __closesthit__cookTorrance()
     float light_dist, light_pdf;
 
     // Pass PRNG state safely
-    float l_u1 = rnd(*prd->rng), l_u2 = rnd(*prd->rng), l_u3 = rnd(*prd->rng);
+    //float l_u1 = rnd(*prd->rng), l_u2 = rnd(*prd->rng), l_u3 = rnd(*prd->rng);
 
-    sampleLight(params, hit_pos, l_u1, l_u2, l_u3, light_dir, light_dist, light_radiance, light_pdf);
+    sampleLight(params, hit_pos, *prd->rng, light_dir, light_dist, light_radiance, light_pdf);
 
     if (light_pdf > 0.0f) {
         float3 Ld_tangent = worldToTangent(light_dir, normal_s, tangent, bitangent);
@@ -873,7 +955,7 @@ extern "C" __global__ void __closesthit__cookTorrance()
 
                 //occluded = false;
 
-                if (occluded) {
+                if (!occluded) {
                     // Note: Ld_tangent.z IS the cos(theta) term in the rendering equation!
                     prd->radiance = light_radiance * brdf_val * Ld_tangent.z * mis_weight / light_pdf;
                 }
@@ -1038,6 +1120,9 @@ extern "C" __global__ void __closesthit__glass()
 
     // Fill payload 
     float3 tint = getTint(sbt, uv);
+    if (length(tint) < 0.1f) {
+        tint = make_float3(1.f);
+    }
     prd->throughput = prd->throughput * tint;
     prd->next_origin = next_origin;
     prd->next_direction = normalize(scattered);

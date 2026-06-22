@@ -29,8 +29,8 @@
 const int width = 800;
 const int height = 600;
 
-const int window_width = 1200;
-const int window_height = 1000;
+const int window_width = width + 400;
+const int window_height = height + 400;
 
 const float PI = 3.14159265f;
 
@@ -303,6 +303,11 @@ int main() {
 		int max_bounces_input = renderer->getParams().max_bounce_depth;
         float blendFactor = 0.0f;
 
+        // Sample tracking and timing
+        std::chrono::high_resolution_clock::time_point sample_start_time;
+        bool sampling_in_progress = false;
+        renderer->setSamplesPerPixel(10);
+        const int target_samples = 100; // Set your target !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         // ----------------------------------------------------------
         // Render Loop
         // ----------------------------------------------------------
@@ -323,8 +328,19 @@ int main() {
             // Input processing
             processInput(window, deltaTime);
 
+            int current_samples_per_pixel = renderer->getParams().samples_per_pixel;
+            int current_sample = renderer->getParams().current_sample;
+
+            // Track if we're starting a new sampling run
+            if (current_sample == 0 && !sampling_in_progress) {
+                sample_start_time = std::chrono::high_resolution_clock::now();
+                sampling_in_progress = true;
+            }
+
 			bool light_changed = false; 
             {
+
+
 				renderer->updateCamera(camera_controller.getCameraData());
                 // Render
                 renderer->render(camera_controller.getCameraData(), renderer->getParams().samples_per_pixel);
@@ -341,7 +357,47 @@ int main() {
                 // Copy to display
                 display.copyFromDevice((CUdeviceptr)renderer->getPixelBuffer());
 
+
                 //glfwSetWindowShouldClose(window, true);
+
+                                // Check if we've reached target samples
+                if (sampling_in_progress && current_samples_per_pixel * current_sample >= target_samples) {
+                    auto sample_end_time = std::chrono::high_resolution_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        sample_end_time - sample_start_time);
+
+                    // Calculate performance metrics
+                    double elapsed_seconds = elapsed.count() / 1000.0;
+                    double samples_per_second = target_samples / elapsed_seconds;
+                    double primary_rays_per_second = (width * height * samples_per_second * current_sample);
+
+                    // Create logs directory if it doesn't exist
+                    std::filesystem::create_directories("logs");
+
+                    // Log to file
+                    std::ofstream perf_log("logs/performance.txt", std::ios::app);
+                    if (perf_log) {
+                        perf_log << "========================================\n";
+                        perf_log << "Scene: " << renderer->getCurrentSceneName() << "\n";
+                        perf_log << "Total Samples: " << target_samples << "\n";
+                        perf_log << "Elapsed Time: " << elapsed.count() << " ms\n";
+                        perf_log << "Samples/Second: " << std::fixed << std::setprecision(2)
+                            << samples_per_second << "\n";
+                        perf_log << "Primary Rays/Second: " << std::scientific << std::setprecision(2)
+                            << primary_rays_per_second << "\n";
+                        perf_log << "========================================\n\n";
+                        perf_log.close();
+                        std::cout << "[Performance] Logged to logs/performance.txt" << std::endl;
+                    }
+                    else {
+                        std::cerr << "[Performance] Failed to open log file" << std::endl;
+                    }
+
+                    screenshot(renderer->getCurrentSceneName(), "_Denoised",
+                        renderer->getPixelBuffer(), renderer->getWidth(),
+                        renderer->getHeight());
+                    glfwSetWindowShouldClose(window, true);
+                }
             }
 
             //================================================================================================================
@@ -529,6 +585,7 @@ int main() {
                     renderer->switchScene(static_cast<SceneID>(i));
 					camera_controller.setPosition(iter_scene.camera_position);
                     camera_controller.setFront(iter_scene.camera_front);
+                    renderer->setupLighting();
                     renderer->resetBuffersOnCameraUpdate();
                 }
             }
@@ -561,25 +618,6 @@ int main() {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
             glfwSwapBuffers(window);
-
-
-            /* here i can benchmark
-            // Ensure screenshots directory exists
-            std::filesystem::create_directories("screenshots");
-
-            // Get current scene name for filename
-            std::string scene_name = renderer->getCurrentSceneName();
-            // Replace spaces with underscores
-            std::replace(scene_name.begin(), scene_name.end(), ' ', '_');
-
-            // Generate timestamped filename
-            std::string filename = generateScreenshotFilename(scene_name);
-            std::vector<uchar4> pixel_data(width * height);
-            CUDA_CHECK(cudaMemcpy(pixel_data.data(), renderer->getPixelBuffer(),
-                width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
-            saveScreenshot(pixel_data.data(), width, height, filename);
-            glfwSetWindowShouldClose(window, true);
-            */
         }
 
         std::cout << "SUCCESS: OptiX succesfuly completed." << std::endl;

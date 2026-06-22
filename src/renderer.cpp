@@ -654,7 +654,7 @@ void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
             // Build OptixOpacityMicromapArray
             OptixOpacityMicromapHistogramEntry histogram{};
             histogram.count = (unsigned int)descs.size();
-            histogram.subdivisionLevel = subdivision_level;
+            histogram.subdivisionLevel = (uint16_t)subdivision_level;
             histogram.format = OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE;
 
             OptixOpacityMicromapArrayBuildInput omm_array_build_input{};
@@ -689,10 +689,10 @@ void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
             CUDA_CHECK(cudaFree((void*)d_omm_descs));
 
             //  Describe OMM attachment for GAS build
-            OptixOpacityMicromapUsageCount usage_count{};
-            usage_count.count = (unsigned int)descs.size();
-            usage_count.subdivisionLevel = subdivision_level;
-            usage_count.format = OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE;
+            object.omm_usage_count = {};
+            object.omm_usage_count.count = (unsigned int)descs.size();
+            object.omm_usage_count.subdivisionLevel = subdivision_level;
+            object.omm_usage_count.format = OPTIX_OPACITY_MICROMAP_FORMAT_4_STATE;
 
             omm_build_input_attachment.indexingMode =
                 OPTIX_OPACITY_MICROMAP_ARRAY_INDEXING_MODE_INDEXED;
@@ -700,7 +700,7 @@ void OptixRenderer::buildGAS(LoadedSceneObject& object, int index) {
             omm_build_input_attachment.indexBuffer = object.d_omm_index_buffer;
             omm_build_input_attachment.indexSizeInBytes = sizeof(uint32_t);
             omm_build_input_attachment.numMicromapUsageCounts = 1;
-            omm_build_input_attachment.micromapUsageCounts = &usage_count;
+            omm_build_input_attachment.micromapUsageCounts = &object.omm_usage_count;
 
             has_omm = true;
             DEBUG_LOGF("[OMM] Built array for '%s': %zu triangles",
@@ -988,10 +988,9 @@ void OptixRenderer::setupLighting() {
     params.samples_per_pixel = 1;  // Progressive sampling
     params.current_frame = 0;
     params.current_sample = 0;
-    params.random_seed = 1415;
 
-    params.envmap.scale = 1.0f;
-    params.envmap.exposure = 0.0f;
+    params.envmap.scale = current_scene_data.envmap_scale;
+    params.envmap.exposure = current_scene_data.envmap_exposure;
 }
 
 // Render the scene using the provided camera and number of samples per pixel. 
@@ -1015,7 +1014,6 @@ void OptixRenderer::render(const Camera& camera, int samples_per_pixel) {
     params.camera = camera;
     params.traversable = ias_handle;
     params.samples_per_pixel = samples_per_pixel;
-    params.random_seed = params.random_seed * 1103515245 + 12345;
 
     CUDA_CHECK(cudaMemcpy((void*)device_buffers.d_params, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
@@ -1297,7 +1295,7 @@ void OptixRenderer::runDenoiser(float blendFactor) {
     OptixDenoiserParams denoiser_params{};
     denoiser_params.blendFactor = blendFactor; // 0 = full denoiser output, 1 = full noisy input
 
-    optixDenoiserInvoke(
+    OPTIX_CHECK(optixDenoiserInvoke(
         denoiser,
         0,
         &denoiser_params,
@@ -1305,13 +1303,11 @@ void OptixRenderer::runDenoiser(float blendFactor) {
         denoiser_sizes.stateSizeInBytes,
         &guide_layer,
         &color_layer,
-        1,    // one color layer
+        1,                  // one color layer
         0, 0,               // offset x, y (0 for full image)
         device_buffers.d_denoiser_scratch,
-        denoiser_sizes.withoutOverlapScratchSizeInBytes);
-
-    // //Then tonemap d_denoised_buffer -> your display output
-    // //(run your ACES + sRGB kernel on the denoised HDR output)
+        denoiser_sizes.withoutOverlapScratchSizeInBytes)
+    );
 }
 
 void OptixRenderer::postprocessAccum() {

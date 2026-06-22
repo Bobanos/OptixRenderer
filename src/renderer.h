@@ -81,7 +81,6 @@ public:
     // Parameter updates
     void setMaxBounceDepth(int depth) { params.max_bounce_depth = depth; }
     void setSamplesPerPixel(int spp) { params.samples_per_pixel = spp; }
-    void setRandomSeed(unsigned int seed) { params.random_seed = seed; }
 
     void updateCamera(const Camera& camera);
     void resetBuffersOnCameraUpdate();

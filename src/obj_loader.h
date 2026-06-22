@@ -63,6 +63,8 @@ struct LoadedSceneObject {
     CUdeviceptr d_omm_array_output = 0;
     CUdeviceptr d_omm_index_buffer = 0;
 
+    OptixOpacityMicromapUsageCount omm_usage_count = {};
+
     OptixTraversableHandle gas_handle = 0;
     uint32_t               sbt_base = 0;
     float                  transform[12] = { 1,0,0,0, 
@@ -71,8 +73,8 @@ struct LoadedSceneObject {
 };
 
 inline std::string resolveTexturePath(
-    const std::string& raw_name,     // what the MTL says, e.g. "wood.png" or "textures/wood.png"
-    const std::string& base_dir)     // base directory to search (e.g., "C:/Users/lukas/OneDrive/Desktop/lumberyard/")
+    const std::string& raw_name,    
+    const std::string& base_dir)     
 {
     // Normalize base_dir to ensure it ends with a separator
     std::string search_root = base_dir;
@@ -195,43 +197,6 @@ inline void loadTextureFromFile(const std::string& path)
 }
 
 
-inline void computeSmoothNormals(LoadedSceneObject& scene_object)
-{
-    // Group vertex indices by position using a spatial hash.
-    // The hash maps position bits to a list of vertex indices at that position.
-    // Vertices at the same world position get the same hash bucket and share normals.
-    auto hashPos = [](float3 p) -> size_t {
-        uint32_t hx, hy, hz;
-        memcpy(&hx, &p.x, 4);
-        memcpy(&hy, &p.y, 4);
-        memcpy(&hz, &p.z, 4);
-        return (size_t)(hx * 2654435761u ^ hy * 805459861u ^ hz * 3674653429u);
-        };
-
-    // Map from position hash -> list of vertex indices sharing that position
-    std::unordered_map<size_t, std::vector<uint32_t>> pos_groups;
-
-    for (uint32_t i = 0; i < (uint32_t)scene_object.vertices.size(); i++)
-        pos_groups[hashPos(scene_object.vertices[i].position)].push_back(i);
-
-    // For each group, sum the face normals (area-weighted via unnormalized cross products)
-    // then normalize the sum and write back to all vertices in the group.
-    for (auto& [hash, group] : pos_groups) {
-        float3 sum = { 0.f, 0.f, 0.f };
-        for (uint32_t vi : group) {
-            const float3& n = scene_object.vertices[vi].normal;
-            sum.x += n.x; sum.y += n.y; sum.z += n.z;
-        }
-        float len = sqrtf(sum.x * sum.x + sum.y * sum.y + sum.z * sum.z);
-        float3 smooth = (len > 1e-6f)
-            ? make_float3(sum.x / len, sum.y / len, sum.z / len)
-            : make_float3(0.f, 1.f, 0.f);  // fallback: point up
-
-        for (uint32_t vi : group)
-            scene_object.vertices[vi].normal = smooth;
-    }
-}
-
 inline LoadedSceneObject loadSceneObject(const std::string& name,
                                          const std::string& obj_path,
                                          const std::string& base_dir)
@@ -294,8 +259,6 @@ inline LoadedSceneObject loadSceneObject(const std::string& name,
             scene_object.sbt_index_buffer.push_back((uint32_t)mat_id);
         }
     }
-    
-    //computeSmoothNormals(scene_object);  // TODO Compute smooth normals where absent
 
     printf("[Scene] '%s': %zu verts, %zu tris, %zu materials\n", name.c_str(), scene_object.vertices.size(), scene_object.indices.size(), scene_object.materials.size());
 
